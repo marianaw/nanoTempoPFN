@@ -47,16 +47,16 @@ from gluonts.time_feature.holiday import (
 from gluonts.time_feature.seasonality import get_seasonality
 from scipy.signal import find_peaks
 
-from src.data.constants import BASE_END_DATE, BASE_START_DATE
-from src.data.frequency import (
-    Frequency,
-    validate_frequency_safety,
-)
-from src.utils.utils import device
+from .constants import BASE_END_DATE, BASE_START_DATE
+from .frequency import Frequency, validate_frequency_safety
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Suppress JAX/absl info logs
+logging.getLogger("jax").setLevel(logging.WARNING)
+logging.getLogger("absl").setLevel(logging.WARNING)
 
 
 # Enhanced feature sets for different frequencies

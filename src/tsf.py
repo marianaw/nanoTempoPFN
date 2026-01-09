@@ -10,6 +10,8 @@ import sys
 sys.path.append('/Users/mariana/Documents/research/xlstm-jax')
 
 from model.models import xLSTMTabModel, xLSTMTabModelConfig
+from data.containers import NpBatchTSContainer
+from data.time_features import compute_batch_time_features
 from xlstm_jax.models.xlstm_clean.blocks.mlstm.layer import mLSTMLayerConfig
 from xlstm_jax.models.xlstm_clean.components.feedforward import FeedForwardConfig
 from xlstm_jax.models.xlstm_clean.blocks.mlstm.block import xLSTMBlockConfig
@@ -26,7 +28,7 @@ class ModelConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
     dropout: float = 0.1
-
+    quantiles: list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 Params = chex.ArrayTree
 PRNGKey = chex.PRNGKey
@@ -40,16 +42,23 @@ class ModelState:
     step: int
 
 
-class xLSTMTimeSeries:
-    """xLSTM model for time series forecasting."""
+def quantile_loss(preds, targets, quantiles):
+    errors = targets - preds
+    return jnp.mean(jnp.maximum(quantiles * errors, (quantiles - 1) * errors))
+
+
+class TimeSeriesForecaster:
+    """Time series forecaster using xLSTM model."""
 
     def __init__(self, config: ModelConfig = None, seed: int = 42):
         self.config = config or ModelConfig()
         self.key = jax.random.PRNGKey(seed)
+        self.quantiles = jnp.array(config.quantiles)
 
         xlstm_config = xLSTMTabModelConfig(
             embedding_dim=self.config.embedding_dim,
             num_blocks=self.config.num_blocks,
+            output_dim=len(self.quantiles),
             context_length=self.config.context_length,
             tie_weights=False,
             add_embedding_dropout=False,
@@ -109,10 +118,7 @@ class xLSTMTimeSeries:
         
         def loss_fn(params, rng, x, y, mask):
             preds = self.model.apply(params, x, train=True, rngs={"dropout": rng})
-            sq_err = optax.losses.squared_error(preds, y)  # (B, T, D)
-            # Expand mask for multivariate: (B, T) -> (B, T, 1)
-            mask_expanded = mask[:, :, None]
-            return jnp.sum(sq_err * mask_expanded) / (jnp.sum(mask_expanded) + 1e-8)
+            return quantile_loss(preds, y, self.quantiles)  # (B, T, D)
 
         def _train_step(state, x, y, mask, rng):
             loss, grads = jax.value_and_grad(loss_fn)(state.params, rng, x, y, mask)
@@ -123,9 +129,7 @@ class xLSTMTimeSeries:
 
         self._train_step = jax.jit(_train_step)
 
-    def train(self, dataset, num_steps: int, batch_size: int = 32, log_every: int = 100):
-        """Train the model on a ChunkedDataset."""
-        self.losses = []
+    def train(self, batch: NpBatchTSContainer):
         
         for step in range(num_steps):
             x, y, mask = dataset.sample_batch(batch_size)
