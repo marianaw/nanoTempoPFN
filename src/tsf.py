@@ -16,6 +16,9 @@ from xlstm_jax.models.xlstm_clean.blocks.mlstm.layer import mLSTMLayerConfig
 from xlstm_jax.models.xlstm_clean.components.feedforward import FeedForwardConfig
 from xlstm_jax.models.xlstm_clean.blocks.mlstm.block import xLSTMBlockConfig
 
+from model.recurrent_lstm_layer import mLSTMWeavingLayer
+from model.recurrent_lstm_cell import mLSTMWeavingCellConfig
+
 
 @dataclass
 class ModelConfig:
@@ -47,6 +50,10 @@ def quantile_loss(preds, targets, quantiles):
     return jnp.mean(jnp.maximum(quantiles * errors, (quantiles - 1) * errors))
 
 
+class xLSTMTimeSeries:
+    pass
+
+
 class TimeSeriesForecaster:
     """Time series forecaster using xLSTM model."""
 
@@ -55,39 +62,7 @@ class TimeSeriesForecaster:
         self.key = jax.random.PRNGKey(seed)
         self.quantiles = jnp.array(config.quantiles)
 
-        xlstm_config = xLSTMTabModelConfig(
-            embedding_dim=self.config.embedding_dim,
-            num_blocks=self.config.num_blocks,
-            output_dim=len(self.quantiles),
-            context_length=self.config.context_length,
-            tie_weights=False,
-            add_embedding_dropout=False,
-            add_post_blocks_norm=True,
-            dtype="bfloat16",
-            mlstm_block=xLSTMBlockConfig(
-                mlstm=mLSTMLayerConfig(
-                    conv1d_kernel_size=4,
-                    qkv_proj_blocksize=4,
-                    num_heads=self.config.num_heads,
-                    proj_factor=2.0,
-                    embedding_dim=self.config.embedding_dim,
-                    bias=True,
-                    dropout=self.config.dropout,
-                    context_length=self.config.context_length,
-                    dtype="bfloat16",
-                ),
-                _num_blocks=1,
-                _block_idx=0,
-                feedforward=FeedForwardConfig(
-                    proj_factor=4.0,
-                    embedding_dim=self.config.embedding_dim,
-                    dropout=self.config.dropout,
-                    dtype="bfloat16",
-                ),
-            ),
-        )
         
-        self.model = xLSTMTabModel(config=xlstm_config)
 
         # Initialize model with proper input dimension
         rng_init = self._next_rng()

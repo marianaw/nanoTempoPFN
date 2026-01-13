@@ -10,16 +10,18 @@ import sys
 sys.path.append('/Users/mariana/Documents/research/xlstm-jax')
 from xlstm_jax.models.xlstm_clean.components.init import bias_linspace_init
 from xlstm_jax.models.xlstm_clean.components.ln import MultiHeadLayerNorm
+from typing import Tuple
 
 
-def weaving_recurrent_lstm(q, k, v, igate_preact, fgate_preact, eps=1e-6):
+def weaving_recurrent_lstm(q: jax.Array, k: jax.Array, v: jax.Array, igate_preact: jax.Array, fgate_preact: jax.Array, 
+                           c_state: jax.Array, n_state: jax.Array, m_state: jax.Array, eps: float = 1e-6):
 
     B, NH, S, DH = q.shape
 
     # Initialize the carry
-    c_state = jnp.zeros((B, NH, DH, DH))
-    n_state = jnp.zeros((B, NH, DH, 1))
-    m_state = jnp.zeros((B, NH, 1, 1))
+    # c_state = jnp.zeros((B, NH, DH, DH))
+    # n_state = jnp.zeros((B, NH, DH, 1))
+    # m_state = jnp.zeros((B, NH, 1, 1))
 
     def recurrent_step(carry, xs):
         c_state, n_state, m_state = carry
@@ -78,8 +80,9 @@ def weaving_recurrent_lstm(q, k, v, igate_preact, fgate_preact, eps=1e-6):
 class mLSTMWeavingBackend(nn.Module):
 
     @nn.compact
-    def __call__(self, q: jax.Array, k: jax.Array, v: jax.Array, i:jax.Array, f:jax.Array, eps:float=1e-6):
-        return weaving_recurrent_lstm(q, k, v, i, f, eps)
+    def __call__(self, q: jax.Array, k: jax.Array, v: jax.Array, i:jax.Array, f:jax.Array,
+                 c_state: jax.Array, n_state: jax.Array, m_state: jax.Array, eps:float=1e-6) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array, jax.Array]]:
+        return weaving_recurrent_lstm(q, k, v, i, f, c_state, n_state, m_state, eps)
 
 @dataclass
 class mLSTMWeavingCellConfig:
@@ -102,7 +105,7 @@ class mLSTMWeavingCell(nn.Module):
     config: mLSTMWeavingCellConfig
 
     @nn.compact
-    def __call__(self, q: jax.Array, k: jax.Array, v: jax.Array, **kwargs):
+    def __call__(self, q: jax.Array, k: jax.Array, v: jax.Array, c_state: jax.Array, n_state: jax.Array, m_state: jax.Array, **kwargs):
         B, S, _ = q.shape
         qkv = jnp.concatenate([q, k, v], axis=-1)  # (B, NH, S, 3*DH)
 
@@ -132,7 +135,7 @@ class mLSTMWeavingCell(nn.Module):
         fgate_preact = fgate_preact.transpose(0, 2, 1)[..., None]  # (B, NH, S, 1)
 
         backend_fn = mLSTMWeavingBackend()
-        h_state, (c_state, n_state, m_state) = backend_fn(q, k, v, igate_preact, fgate_preact)
+        h_state, (c_state, n_state, m_state) = backend_fn(q, k, v, igate_preact, fgate_preact, c_state, n_state, m_state)
         # h_state is of shape (B, NH, S, DH)
         
         h_state_norm = MultiHeadLayerNorm(weight=True, bias=False, dtype=self.config._dtype, name="outnorm")(h_state)
