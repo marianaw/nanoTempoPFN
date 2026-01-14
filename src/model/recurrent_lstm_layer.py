@@ -5,9 +5,8 @@ sys.path.append('/Users/mariana/Documents/research/nanoTempoPFN/src')
 import chex
 import jax.numpy as jnp
 import jax
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from flax import linen as nn
-from xlstm_jax.models.xlstm_clean.blocks.mlstm.layer import mLSTMLayerConfig
 from xlstm_jax.models.xlstm_clean.components.init import small_init, wang_init
 from xlstm_jax.models.xlstm_clean.components.conv import CausalConv1d, CausalConv1dConfig
 from xlstm_jax.models.xlstm_clean.components.linear_headwise import (
@@ -18,8 +17,42 @@ from model.recurrent_lstm_cell import mLSTMWeavingCell, mLSTMWeavingCellConfig
 from typing import Tuple
 
 
+@dataclass
+class mLSTMWeavingLayerConfig:
+    conv1d_kernel_size: int = 4
+    qkv_proj_blocksize: int = 4
+    num_heads: int = None  #NH
+
+    # will be set toplevel config
+    embedding_dim: int = None  # DH, the per head embedding dimension
+    bias: bool = False
+    dropout: float = 0.0
+    dtype: str = "bfloat16"
+
+    _num_blocks: int = 1
+    _inner_embedding_dim: int = None
+
+    mlstm_cell: mLSTMWeavingCellConfig = field(default_factory=mLSTMWeavingCellConfig)
+
+    def __post_init__(self):
+        self._inner_embedding_dim = self.embedding_dim * self.num_heads
+        self.mlstm_cell.embedding_dim = self._inner_embedding_dim
+        self.mlstm_cell.num_heads = self.num_heads
+        self.mlstm_cell.dtype = self.dtype
+
+    @property
+    def _dtype(self) -> jnp.dtype:
+        """
+        Returns the real dtype instead of the str from configs.
+
+        Returns:
+            The jnp dtype corresponding to the string value.
+        """
+        return getattr(jnp, self.dtype)
+
+
 class mLSTMWeavingLayer(nn.Module):
-    config: mLSTMLayerConfig
+    config: mLSTMWeavingLayerConfig
 
     @nn.compact
     def __call__(self, x: chex.Array, c_state: chex.Array, n_state: chex.Array, m_state: chex.Array, train: bool = False) -> chex.Array:
@@ -79,8 +112,6 @@ class mLSTMWeavingLayer(nn.Module):
             kernel_init=small_init(self.config.embedding_dim),
             name="v_proj",
         )(x_lstm)
-
-        print(f" q shape is {q.shape} \n\n\n")
 
         h_tilde_state, (c_state, n_state, m_state) = mLSTMWeavingCell(config=self.config.mlstm_cell, name="mlstm_weaving_cell")(q=q,
                                                                                                                                 k=k,

@@ -125,8 +125,6 @@ class mLSTMWeavingCell(nn.Module):
             name="fgate",
         )(qkv)
 
-        print(f"SHAPES igate_preact, fgate_preact = {igate_preact.shape}, {fgate_preact.shape}")
-
         q = q.reshape(B, self.config.num_heads, S, -1)  # (B, NH, S, DH)
         k = k.reshape(B, self.config.num_heads, S, -1)  # (B, NH, S, DH)
         v = v.reshape(B, self.config.num_heads, S, -1)  # (B, NH, S, DH)
