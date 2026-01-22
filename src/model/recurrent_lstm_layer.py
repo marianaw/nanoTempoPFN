@@ -1,6 +1,6 @@
-import sys
-sys.path.append('/Users/mariana/Documents/research/xlstm-jax')
-sys.path.append('/Users/mariana/Documents/research/nanoTempoPFN/src')
+# import sys
+# sys.path.append('/Users/mariana/Documents/research/xlstm-jax')
+# sys.path.append('/Users/mariana/Documents/research/nanoTempoPFN/src')
 
 import chex
 import jax.numpy as jnp
@@ -13,7 +13,7 @@ from xlstm_jax.models.xlstm_clean.components.linear_headwise import (
     LinearHeadwiseExpand,
     LinearHeadwiseExpandConfig,
 )
-from model.recurrent_lstm_cell import mLSTMWeavingCell, mLSTMWeavingCellConfig
+from src.model.recurrent_lstm_cell import mLSTMWeavingCell, mLSTMWeavingCellConfig
 from typing import Tuple
 
 

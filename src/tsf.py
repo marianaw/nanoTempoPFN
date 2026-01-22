@@ -7,13 +7,10 @@ import pickle
 import numpy as np
 from flax import linen as nn
 
-import sys
-sys.path.append('/Users/mariana/Documents/research/xlstm-jax')
+from src.data.containers import NpBatchTSContainer
+from src.data.time_features import compute_batch_time_features
 
-from data.containers import NpBatchTSContainer
-from data.time_features import compute_batch_time_features
-
-from model.recurrent_lstm_layer import mLSTMWeavingLayerConfig, mLSTMWeavingLayer
+from src.model.recurrent_lstm_layer import mLSTMWeavingLayerConfig, mLSTMWeavingLayer
 
 
 @dataclass
