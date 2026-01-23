@@ -6,10 +6,9 @@ import chex
 import pickle
 import numpy as np
 from flax import linen as nn
-
-from src.data.containers import NpBatchTSContainer
+from tqdm import tqdm
+from src.data.containers import DataLoader, NpBatchTSContainer
 from src.data.time_features import compute_batch_time_features
-
 from src.model.recurrent_lstm_layer import mLSTMWeavingLayerConfig, mLSTMWeavingLayer
 
 
@@ -112,7 +111,6 @@ class xLSTMTSModel(nn.Module):
         n_state = jnp.zeros((B * n_channels, NH, DH, 1))
         m_state = jnp.zeros((B * n_channels, NH, 1, 1))
 
-
         preds, _ = self.weaving_block(inputs, c_state, n_state, m_state, training=training)
         preds = preds[:, -f_len:, :]
         preds = self.output_proj(preds)
@@ -120,6 +118,7 @@ class xLSTMTSModel(nn.Module):
         return preds
 
 
+# This is for training, maybe it's worth re-arranging this stuff somewhere else.
 @chex.dataclass(frozen=True)
 class ModelState:
     params: Params
@@ -133,6 +132,11 @@ class TrainingConfig:
     weight_decay: float = 0.0
     dropout: float = 0.1
     quantiles: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    model_config: ModelConfig = field(default_factory=lambda: ModelConfig())
+    log_every: int = 10000
+    num_epochs: int = 100
+    batch_size: int = 32
+    time_dim: int = 6  # what they call K_max in tempoPFN
 
 
 def quantile_loss(preds, targets, quantiles):
@@ -142,110 +146,94 @@ def quantile_loss(preds, targets, quantiles):
 
 class TimeSeriesForecaster:
     """Time series forecaster using xLSTM model."""
-    pass
+    
+    def __init__(self, config: TrainingConfig = None, seed: int = 42):
+        self.config = config or TrainingConfig()
+        self.key = jax.random.PRNGKey(seed)
+        self.quantiles = jnp.array(self.config.quantiles)
 
-    # def __init__(self, config: WeavingLSTMConfig = None, seed: int = 42):
-    #     self.config = config or WeavingLSTMConfig()
-    #     self.key = jax.random.PRNGKey(seed)
-    #     self.quantiles = jnp.array(config.quantiles)
+        # define model:
+        self.model = xLSTMTSModel(config=self.config.model_config)
 
-    #     # Initialize model with proper input dimension
-    #     rng_init = self._next_rng()
-    #     dummy_input = jnp.ones((1, self.config.context_length, self.config.input_dim))
-    #     params = self.model.init({"params": rng_init, "dropout": rng_init}, dummy_input)
+        # Initialize model with proper input dimension
+        x = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, 1, self.config.model_config.input_dim))
+        t_hist = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
+        t_future = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
 
-    #     # Optimizer
-    #     self.optimizer = optax.adamw(
-    #         learning_rate=self.config.learning_rate, 
-    #         weight_decay=self.config.weight_decay
-    #     )
+        params = self.model.init(self._next_rng(), x, t_hist, t_future)
 
-    #     # Model state
-    #     self.model_state = ModelState(
-    #         params=params,
-    #         opt_state=self.optimizer.init(params),
-    #         step=0,
-    #     )
+        # Optimizer
+        self.optimizer = optax.adamw(
+            learning_rate=self.config.learning_rate, 
+            weight_decay=self.config.weight_decay
+        )
 
-    #     # Build JIT-compiled functions
-    #     self._build_train_step()
+        # Model state
+        self.model_state = ModelState(
+            params=params,
+            opt_state=self.optimizer.init(params),
+            step=0,
+        )
+
+        # Build JIT-compiled functions
+        self._build_train_step()
+
+    def _build_train_step(self):
+        """Build JIT-compiled training step."""
         
-    #     # Training history
-    #     self.losses = []
+        def loss_fn(params, rng, x, t_hist, t_future, y, mask=None):
+            preds = self.model.apply(params, x, t_hist, t_future, training=True, rngs={"dropout": rng})
+            return quantile_loss(preds, y, self.quantiles)  # (B, T, D)
 
-    # def _build_train_step(self):
-    #     """Build JIT-compiled training step."""
-        
-    #     def loss_fn(params, rng, x, y, mask):
-    #         preds = self.model.apply(params, x, train=True, rngs={"dropout": rng})
-    #         return quantile_loss(preds, y, self.quantiles)  # (B, T, D)
+        def _train_step(state, x, t_hist, t_future, y, mask, rng):
+            loss, grads = jax.value_and_grad(loss_fn)(state.params, rng, x, t_hist, t_future, y, mask)
+            updates, opt_state = self.optimizer.update(grads, state.opt_state, state.params)
+            params = optax.apply_updates(state.params, updates)
+            new_state = state.replace(params=params, opt_state=opt_state, step=state.step + 1)
+            return new_state, loss
 
-    #     def _train_step(state, x, y, mask, rng):
-    #         loss, grads = jax.value_and_grad(loss_fn)(state.params, rng, x, y, mask)
-    #         updates, opt_state = self.optimizer.update(grads, state.opt_state, state.params)
-    #         params = optax.apply_updates(state.params, updates)
-    #         new_state = state.replace(params=params, opt_state=opt_state, step=state.step + 1)
-    #         return new_state, loss
+        self._train_step = jax.jit(_train_step)
 
-    #     self._train_step = jax.jit(_train_step)
+    def train_step(self, batch: NpBatchTSContainer) -> float:
+        # time features
+        history_tf, future_tf = compute_batch_time_features(
+            start=batch.start,
+            history_length=batch.history_length,
+            future_length=batch.future_length,
+            batch_size=batch.batch_size,
+            frequency=batch.frequency,
+        )
 
-    # def train(self, batch: NpBatchTSContainer):
-        
-    #     for step in range(num_steps):
-    #         x, y, mask = dataset.sample_batch(batch_size)
-    #         x, y, mask = jnp.array(x), jnp.array(y), jnp.array(mask)
-            
-    #         self.model_state, loss = self._train_step(
-    #             self.model_state, x, y, mask, self._next_rng()
-    #         )
-    #         self.losses.append(float(loss))
-            
-    #         if step % log_every == 0:
-    #             print(f"Step {step:4d} | Loss: {loss:.6f}")
-        
-    #     print(f"Training complete. Final loss: {self.losses[-1]:.6f}")
-    #     return self.losses
+        x, y = batch.history, batch.future
 
-    # def predict(self, x: Array) -> Array:
-    #     """One-step ahead prediction."""
-    #     if x.ndim == 2:
-    #         x = x[:, :, None]
-    #     return self.model.apply(self.model_state.params, x, train=False)
+        self.model_state, loss = self._train_step(
+            self.model_state, x, history_tf, future_tf, y, None, self._next_rng()
+        )
 
-    # def generate(self, context: Array, n_steps: int = None) -> Array:
-    #     """Autoregressive generation from context.
-        
-    #     Args:
-    #         context: Initial context of shape (B, S, D) or (B, S)
-    #         n_steps: Number of steps to generate (default: config.max_new_steps)
-        
-    #     Returns:
-    #         Full sequence including context and generated steps: (B, S + n_steps, D)
-    #     """
-    #     n_steps = n_steps or self.config.max_new_steps
-        
-    #     # Ensure 3D input
-    #     if context.ndim == 2:
-    #         context = context[:, :, None]
-        
-    #     B, S, D = context.shape
-    #     buffer = jnp.concatenate([context, jnp.zeros((B, n_steps, D))], axis=1)
+        return loss.item()
 
-    #     for i in range(n_steps):
-    #         ctx = buffer[:, i:i + S, :]
-    #         preds = self.model.apply(self.model_state.params, ctx, train=False)
-    #         next_val = preds[:, -1, :]  # (B, D)
-    #         buffer = buffer.at[:, S + i, :].set(next_val)
-        
-    #     return np.array(buffer)
+    def train(self, loader: DataLoader) -> list[float]:
+        losses = []
+        for batch in tqdm(loader, total=len(loader)):
+            loss = self.train_step(batch)
+            if self.model_state.step % self.config.log_every == 0:
+                print(f"Step {self.model_state.step:4d} | Loss: {loss:.6f}")
+            losses.append(loss)
+        print(f"Training complete. Final loss: {losses[-1]:.6f}")
+        return losses
 
-    # def _next_rng(self):
-    #     self.key, rng = jax.random.split(self.key)
-    #     return rng
+    def predict(self, x_hist: Array, t_hist: Array, t_future: Array) -> Array:
+        if x_hist.ndim == 2:
+            x_hist = x_hist[:, :, None]
+        return self.model.apply(self.model_state.params, x_hist, t_hist, t_future, train=False)
 
-    # def save(self, path: str):
-    #     pickle.dump(self.model_state.params, open(path, "wb"))
+    def _next_rng(self):
+        self.key, rng = jax.random.split(self.key)
+        return rng
 
-    # def load(self, path: str):
-    #     params = pickle.load(open(path, "rb"))
-    #     self.model_state = self.model_state.replace(params=params)
+    def save(self, path: str):
+        pickle.dump(self.model_state.params, open(path, "wb"))
+
+    def load(self, path: str):
+        params = pickle.load(open(path, "rb"))
+        self.model_state = self.model_state.replace(params=params)

@@ -19,8 +19,10 @@ def load_arrow_file(path):
     """
     file_path = Path(path)
     ext = file_path.suffix.lower()
-    if ext == ".arrow" or ext == ".feather":
-        # feather is the canonical loader for .arrow/.feather
+    if ext == ".arrow":
+        with pa.ipc.open_file(str(file_path)) as reader:
+            return reader.read_all()
+    elif ext == ".feather":
         return feather.read_table(str(file_path))
     elif ext == ".parquet":
         return pq.read_table(str(file_path))
@@ -101,6 +103,10 @@ class DataLoader:
         np.random.seed(seed)
         random.seed(seed)
         self.df = pd.DataFrame()  # Empty until __iter__ is called
+
+    def __len__(self):
+        """Return approximate number of batches per epoch."""
+        return len(self.dataset.files_list) * self.dataset.batches_per_shard
 
     def __iter__(self):
         """Called at the start of each `for batch in loader:` loop."""
