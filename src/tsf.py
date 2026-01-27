@@ -195,14 +195,18 @@ class TimeSeriesForecaster:
         self._train_step = jax.jit(_train_step)
 
     def train_step(self, batch: NpBatchTSContainer) -> float:
-        # time features
-        history_tf, future_tf = compute_batch_time_features(
-            start=batch.start,
-            history_length=batch.history_length,
-            future_length=batch.future_length,
-            batch_size=batch.batch_size,
-            frequency=batch.frequency,
-        )
+        # Use preloaded time features if available, otherwise compute
+        if batch.history_time_features is not None and batch.future_time_features is not None:
+            history_tf = batch.history_time_features
+            future_tf = batch.future_time_features
+        else:
+            history_tf, future_tf = compute_batch_time_features(
+                start=batch.start,
+                history_length=batch.history_length,
+                future_length=batch.future_length,
+                batch_size=batch.batch_size,
+                frequency=batch.frequency,
+            )
 
         x, y = batch.history, batch.future
 
