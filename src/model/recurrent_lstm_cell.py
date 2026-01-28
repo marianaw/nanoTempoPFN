@@ -2,8 +2,6 @@ import jax
 import jax.numpy as jnp
 import math
 from flax import linen as nn
-import jax
-import jax.numpy as jnp
 from dataclasses import dataclass
 
 import sys

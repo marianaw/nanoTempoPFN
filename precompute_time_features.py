@@ -3,6 +3,7 @@
 
 import argparse
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -19,7 +20,7 @@ def precompute_for_file(
     history_length: int,
     future_length: int,
     K_max: int,
-    batch_size: int = 1,
+    batch_size: int = 64,
 ):
     """Precompute time features for a single file."""
     # Load data
@@ -95,6 +96,26 @@ def precompute_for_file(
                 writer.write_table(batch_table)
 
 
+def process_gen_type(gen_type, root_path, output_path, history_length, future_length, K_max):
+    """Process all files for a single generator type."""
+    input_dir = root_path / gen_type
+    if not input_dir.exists():
+        return
+
+    arrow_files = list(input_dir.glob('*.arrow'))
+    print(f"\nProcessing {len(arrow_files)} files from {gen_type}...")
+
+    for arrow_file in tqdm(arrow_files, desc=gen_type):
+        output_file = output_path / gen_type / arrow_file.name
+        precompute_for_file(
+            arrow_file,
+            output_file,
+            history_length,
+            future_length,
+            K_max,
+        )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root-path', type=str, default='data', help='Root data directory')
@@ -102,6 +123,7 @@ def main():
     parser.add_argument('--history-length', type=int, default=1536, help='History length')
     parser.add_argument('--future-length', type=int, default=512, help='Future length')
     parser.add_argument('--K-max', type=int, default=6, help='Max time features')
+    parser.add_argument('--num-workers', type=int, default=4, help='Number of parallel workers')
     args = parser.parse_args()
 
     root_path = Path(args.root_path)
@@ -109,23 +131,21 @@ def main():
 
     gen_types = ['gp', 'kernel', 'sinewave', 'sawtooth', 'step', 'spike', 'anomaly', 'ou_process']
 
-    for gen_type in gen_types:
-        input_dir = root_path / gen_type
-        if not input_dir.exists():
-            continue
-
-        arrow_files = list(input_dir.glob('*.arrow'))
-        print(f"\nProcessing {len(arrow_files)} files from {gen_type}...")
-
-        for arrow_file in tqdm(arrow_files, desc=gen_type):
-            output_file = output_path / gen_type / arrow_file.name
-            precompute_for_file(
-                arrow_file,
-                output_file,
+    with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+        futures = [
+            executor.submit(
+                process_gen_type,
+                gen_type,
+                root_path,
+                output_path,
                 args.history_length,
                 args.future_length,
                 args.K_max,
             )
+            for gen_type in gen_types
+        ]
+        for future in futures:
+            future.result()
 
     print(f"\nDone! Time features saved to {output_path}")
 
