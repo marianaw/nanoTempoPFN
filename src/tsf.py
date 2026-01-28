@@ -10,6 +10,7 @@ from tqdm import tqdm
 from src.data.containers import DataLoader, NpBatchTSContainer
 from src.data.time_features import compute_batch_time_features
 from src.model.recurrent_lstm_layer import mLSTMWeavingLayerConfig, mLSTMWeavingLayer
+from src.model.robust_scaler import RobustScaler
 
 
 @dataclass
@@ -59,6 +60,11 @@ class ModelConfig:
         self.weaving_block_config.n_layers = self.n_layers
 
 
+def _handle_missing_data(x):
+    """TODO: we need to do something about nans here"""
+    return x
+
+
 class xLSTMTSModel(nn.Module):
     config: ModelConfig
 
@@ -73,7 +79,7 @@ class xLSTMTSModel(nn.Module):
         self.output_proj = nn.Dense(self.config.output_dim)
 
     def __call__(self,
-                 x_hist: jax.Array,  # Inputs, (B, h_len, n_channels, 1)
+                 x_hist: jax.Array,  # Inputs, (B, h_len, n_channels, 1) -- input_dim is 1 by default.
                  t_hist: jax.Array,  # History timestamps, (B, h_len, K)
                  t_future: jax.Array,  # Future timestamps, (B, f_len, K)
                  training: bool = False) -> jax.Array:
@@ -152,6 +158,9 @@ class TimeSeriesForecaster:
         self.key = jax.random.PRNGKey(seed)
         self.quantiles = jnp.array(self.config.quantiles)
 
+        #scaler for data
+        self.robust_scaler = RobustScaler(epsilon=1e-6, min_scale=1e-3)
+
         # define model:
         self.model = xLSTMTSModel(config=self.config.model_config)
 
@@ -182,7 +191,10 @@ class TimeSeriesForecaster:
         """Build JIT-compiled training step."""
         
         def loss_fn(params, rng, x, t_hist, t_future, y, mask=None):
+            x = _handle_missing_data(x)
+            x, (m, iqr) = self.robust_scaler.scale(x)
             preds = self.model.apply(params, x, t_hist, t_future, training=True, rngs={"dropout": rng})
+            preds = self.robust_scaler.inverse_scale(preds, m, iqr)
             return quantile_loss(preds, y, self.quantiles)  # (B, T, D)
 
         def _train_step(state, x, t_hist, t_future, y, mask, rng):
@@ -227,9 +239,13 @@ class TimeSeriesForecaster:
         return losses
 
     def predict(self, x_hist: Array, t_hist: Array, t_future: Array) -> Array:
-        if x_hist.ndim == 2:
-            x_hist = x_hist[:, :, None]
-        return self.model.apply(self.model_state.params, x_hist, t_hist, t_future, train=False)
+        if x_hist.ndim == 3:
+            x_hist = x_hist[:, :, :, None]
+        
+        x_hist, (m, iqr) = self.robust_scaler(x_hist)
+        preds = self.model.apply(self.model_state.params, x_hist, t_hist, t_future, train=False)
+        preds = self.robust_scaler._inverse_scale(preds, m, iqr)
+        return preds
 
     def _next_rng(self):
         self.key, rng = jax.random.split(self.key)
