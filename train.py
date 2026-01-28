@@ -18,7 +18,7 @@ def main():
     parser.add_argument(
         "--save-path",
         type=str,
-        default="model_checkpoint.pkl",
+        default="checkpoints/toy_model.pkl",
         help="Path to save trained model"
     )
     args = parser.parse_args()

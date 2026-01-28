@@ -40,7 +40,8 @@ class RobustScaler:
     def inverse_scale(self, x: chex.Array, medians: chex.Array, iqrs: chex.Array) -> chex.Array:
         dd = iqrs + self.epsilon
         dd = jnp.where(dd >= self.min_scale, dd, self.min_scale)
-        if x.ndim == 4:
+        # Only expand dims if x has more dimensions AND last dim > 1 (e.g., quantiles)
+        if x.ndim == 4 and x.shape[-1] > 1:
             dd = jnp.expand_dims(dd, -1)
             medians = jnp.expand_dims(medians, -1)
         return x * dd + medians
