@@ -441,6 +441,7 @@ def compute_batch_time_features(
     frequency: list[Frequency],
     K_max: int = 6,
     time_feature_config: dict[str, Any] | None = None,
+    include_extra: bool = False,
 ):
     """
     Compute time features from start timestamps and frequency.
@@ -461,6 +462,8 @@ def compute_batch_time_features(
         Maximum number of time features to pad to (default: 6).
     time_feature_config : dict, optional
         Configuration for enhanced time features.
+    include_extra : bool, optional
+        Include expensive features (holidays, auto-seasonality). Default: False.
 
     Returns
     -------
@@ -468,14 +471,22 @@ def compute_batch_time_features(
         (history_time_features, target_time_features) where each is a chex.Array
         of shape (batch_size, length, K_max).
     """
-    # Initialize enhanced feature generator
+    # Configure feature generator - disable expensive features if not needed
     feature_config = time_feature_config or {}
+    if not include_extra:
+        feature_config = {
+            **feature_config,
+            'use_holiday_features': False,
+            'use_auto_seasonality': False,
+        }
+
     feature_generator = TimeFeatureGenerator(**feature_config)
 
-    # Generate timestamps and features
-    history_features_list = []
-    future_features_list = []
+    # Preallocate output arrays for better performance
+    history_time_features = np.zeros((batch_size, history_length, K_max))
+    future_time_features = np.zeros((batch_size, future_length, K_max))
     total_length = history_length + future_length
+
     for i in range(batch_size):
         frequency_i = frequency[i]
         freq_str = frequency_i.to_pandas_freq(for_date_range=True)
@@ -484,18 +495,13 @@ def compute_batch_time_features(
         # Validate start timestamp is within safe bounds
         start_ts = pd.Timestamp(start[i])
         if not validate_frequency_safety(start_ts, total_length, frequency_i):
-            logger.debug(
-                f"Start date {start_ts} not safe for total_length={total_length}, frequency={frequency_i}. "
-                f"Using BASE_START_DATE instead."
-            )
             start_ts = BASE_START_DATE
 
-        # Create history range with bounds checking
+        # Create date ranges with bounds checking
         history_range = pd.date_range(start=start_ts, periods=history_length, freq=freq_str)
 
-        # Check if history range goes beyond safe bounds
         if history_range[-1] > BASE_END_DATE:
-            safe_start = BASE_END_DATE - pd.tseries.frequencies.to_offset(freq_str) * (history_length + future_length)
+            safe_start = BASE_END_DATE - pd.tseries.frequencies.to_offset(freq_str) * total_length
             if safe_start < BASE_START_DATE:
                 safe_start = BASE_START_DATE
             history_range = pd.date_range(start=safe_start, periods=history_length, freq=freq_str)
@@ -507,25 +513,15 @@ def compute_batch_time_features(
         history_period_idx = history_range.to_period(period_freq_str)
         future_period_idx = future_range.to_period(period_freq_str)
 
-        # Compute enhanced features
+        # Compute and store features directly in preallocated arrays
         history_features = feature_generator.compute_features(history_period_idx, history_range, freq_str)
         future_features = feature_generator.compute_features(future_period_idx, future_range, freq_str)
 
-        # Pad or truncate to K_max
-        history_features = _pad_or_truncate_features(history_features, K_max)
-        future_features = _pad_or_truncate_features(future_features, K_max)
+        # Pad or truncate and assign
+        history_time_features[i] = _pad_or_truncate_features(history_features, K_max)
+        future_time_features[i] = _pad_or_truncate_features(future_features, K_max)
 
-        history_features_list.append(history_features)
-        future_features_list.append(future_features)
-
-    # Stack into batch tensors
-    history_time_features = np.stack(history_features_list, axis=0)
-    future_time_features = np.stack(future_features_list, axis=0)
-
-    return (
-        jnp.array(history_time_features),
-        jnp.array(future_time_features),
-    )
+    return jnp.array(history_time_features), jnp.array(future_time_features)
 
 
 def _pad_or_truncate_features(features: np.ndarray, K_max: int) -> np.ndarray:

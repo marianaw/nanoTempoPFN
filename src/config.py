@@ -4,7 +4,7 @@ from omegaconf import OmegaConf, DictConfig
 
 from src.model.recurrent_lstm_cell import mLSTMWeavingCellConfig
 from src.model.recurrent_lstm_layer import mLSTMWeavingLayerConfig
-from src.tsf import WeavingBlockLSTMConfig, ModelConfig
+from src.tsf import WeavingBlockLSTMConfig, ModelConfig, TrainingConfig
 
 
 def make_config(
@@ -105,4 +105,22 @@ def cfg_to_model_config(cfg):
         n_layers=cfg.n_layers,
         output_dim=cfg.output_dim,
         weaving_block_config=block,
+    )
+
+
+def cfg_to_training_config(cfg):
+    """Convert OmegaConf config to TrainingConfig dataclass."""
+    model_config = cfg_to_model_config(cfg)
+
+    training_cfg = cfg.training if "training" in cfg else cfg
+
+    return TrainingConfig(
+        learning_rate=training_cfg.get("learning_rate", 1e-3),
+        weight_decay=training_cfg.get("weight_decay", 0.0),
+        dropout=cfg.dropout,
+        quantiles=list(training_cfg.get("quantiles", [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])),
+        model_config=model_config,
+        log_every=training_cfg.get("log_every", 10),
+        num_epochs=training_cfg.get("num_epochs", 100),
+        batch_size=training_cfg.get("batch_size", 32),
     )

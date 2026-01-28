@@ -6,11 +6,11 @@ import chex
 import pickle
 import numpy as np
 from flax import linen as nn
-
-from src.data.containers import NpBatchTSContainer
+from tqdm import tqdm
+from src.data.containers import DataLoader, NpBatchTSContainer
 from src.data.time_features import compute_batch_time_features
-
 from src.model.recurrent_lstm_layer import mLSTMWeavingLayerConfig, mLSTMWeavingLayer
+from src.model.robust_scaler import RobustScaler
 
 
 @dataclass
@@ -60,6 +60,11 @@ class ModelConfig:
         self.weaving_block_config.n_layers = self.n_layers
 
 
+def _handle_missing_data(x):
+    """TODO: we need to do something about nans here"""
+    return x
+
+
 class xLSTMTSModel(nn.Module):
     config: ModelConfig
 
@@ -74,7 +79,7 @@ class xLSTMTSModel(nn.Module):
         self.output_proj = nn.Dense(self.config.output_dim)
 
     def __call__(self,
-                 x_hist: jax.Array,  # Inputs, (B, h_len, n_channels, 1)
+                 x_hist: jax.Array,  # Inputs, (B, h_len, n_channels, 1) -- input_dim is 1 by default.
                  t_hist: jax.Array,  # History timestamps, (B, h_len, K)
                  t_future: jax.Array,  # Future timestamps, (B, f_len, K)
                  training: bool = False) -> jax.Array:
@@ -112,7 +117,6 @@ class xLSTMTSModel(nn.Module):
         n_state = jnp.zeros((B * n_channels, NH, DH, 1))
         m_state = jnp.zeros((B * n_channels, NH, 1, 1))
 
-
         preds, _ = self.weaving_block(inputs, c_state, n_state, m_state, training=training)
         preds = preds[:, -f_len:, :]
         preds = self.output_proj(preds)
@@ -120,6 +124,7 @@ class xLSTMTSModel(nn.Module):
         return preds
 
 
+# This is for training, maybe it's worth re-arranging this stuff somewhere else.
 @chex.dataclass(frozen=True)
 class ModelState:
     params: Params
@@ -133,6 +138,11 @@ class TrainingConfig:
     weight_decay: float = 0.0
     dropout: float = 0.1
     quantiles: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    model_config: ModelConfig = field(default_factory=lambda: ModelConfig())
+    log_every: int = 10000
+    num_epochs: int = 100
+    batch_size: int = 32
+    time_dim: int = 6  # what they call K_max in tempoPFN
 
 
 def quantile_loss(preds, targets, quantiles):
@@ -142,110 +152,108 @@ def quantile_loss(preds, targets, quantiles):
 
 class TimeSeriesForecaster:
     """Time series forecaster using xLSTM model."""
-    pass
+    
+    def __init__(self, config: TrainingConfig = None, seed: int = 42):
+        self.config = config or TrainingConfig()
+        self.key = jax.random.PRNGKey(seed)
+        self.quantiles = jnp.array(self.config.quantiles)
 
-    # def __init__(self, config: WeavingLSTMConfig = None, seed: int = 42):
-    #     self.config = config or WeavingLSTMConfig()
-    #     self.key = jax.random.PRNGKey(seed)
-    #     self.quantiles = jnp.array(config.quantiles)
+        #scaler for data
+        self.robust_scaler = RobustScaler(epsilon=1e-6, min_scale=1e-3)
 
-    #     # Initialize model with proper input dimension
-    #     rng_init = self._next_rng()
-    #     dummy_input = jnp.ones((1, self.config.context_length, self.config.input_dim))
-    #     params = self.model.init({"params": rng_init, "dropout": rng_init}, dummy_input)
+        # define model:
+        self.model = xLSTMTSModel(config=self.config.model_config)
 
-    #     # Optimizer
-    #     self.optimizer = optax.adamw(
-    #         learning_rate=self.config.learning_rate, 
-    #         weight_decay=self.config.weight_decay
-    #     )
+        # Initialize model with proper input dimension
+        x = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, 1, self.config.model_config.input_dim))
+        t_hist = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
+        t_future = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
 
-    #     # Model state
-    #     self.model_state = ModelState(
-    #         params=params,
-    #         opt_state=self.optimizer.init(params),
-    #         step=0,
-    #     )
+        params = self.model.init(self._next_rng(), x, t_hist, t_future)
 
-    #     # Build JIT-compiled functions
-    #     self._build_train_step()
+        # Optimizer
+        self.optimizer = optax.adamw(
+            learning_rate=self.config.learning_rate, 
+            weight_decay=self.config.weight_decay
+        )
+
+        # Model state
+        self.model_state = ModelState(
+            params=params,
+            opt_state=self.optimizer.init(params),
+            step=0,
+        )
+
+        # Build JIT-compiled functions
+        self._build_train_step()
+
+    def _build_train_step(self):
+        """Build JIT-compiled training step."""
         
-    #     # Training history
-    #     self.losses = []
+        def loss_fn(params, rng, x, t_hist, t_future, y, mask=None):
+            x = _handle_missing_data(x)
+            x, (m, iqr) = self.robust_scaler.scale(x)
+            preds = self.model.apply(params, x, t_hist, t_future, training=True, rngs={"dropout": rng})
+            preds = self.robust_scaler.inverse_scale(preds, m, iqr)
+            return quantile_loss(preds, y, self.quantiles)  # (B, T, D)
 
-    # def _build_train_step(self):
-    #     """Build JIT-compiled training step."""
+        def _train_step(state, x, t_hist, t_future, y, mask, rng):
+            loss, grads = jax.value_and_grad(loss_fn)(state.params, rng, x, t_hist, t_future, y, mask)
+            updates, opt_state = self.optimizer.update(grads, state.opt_state, state.params)
+            params = optax.apply_updates(state.params, updates)
+            new_state = state.replace(params=params, opt_state=opt_state, step=state.step + 1)
+            return new_state, loss
+
+        self._train_step = jax.jit(_train_step)
+
+    def train_step(self, batch: NpBatchTSContainer) -> float:
+        # Use preloaded time features if available, otherwise compute
+        if batch.history_time_features is not None and batch.future_time_features is not None:
+            history_tf = batch.history_time_features
+            future_tf = batch.future_time_features
+        else:
+            history_tf, future_tf = compute_batch_time_features(
+                start=batch.start,
+                history_length=batch.history_length,
+                future_length=batch.future_length,
+                batch_size=batch.batch_size,
+                frequency=batch.frequency,
+            )
+
+        x, y = batch.history, batch.future
+
+        self.model_state, loss = self._train_step(
+            self.model_state, x, history_tf, future_tf, y, None, self._next_rng()
+        )
+
+        return loss.item()
+
+    def train(self, loader: DataLoader) -> list[float]:
+        losses = []
+        for batch in tqdm(loader, total=len(loader)):
+            loss = self.train_step(batch)
+            if self.model_state.step % self.config.log_every == 0:
+                print(f"Step {self.model_state.step:4d} | Loss: {loss:.6f}")
+            losses.append(loss)
+        print(f"Training complete. Final loss: {losses[-1]:.6f}")
+        return losses
+
+    def predict(self, x_hist: Array, t_hist: Array, t_future: Array) -> Array:
+        if x_hist.ndim == 3:
+            x_hist = x_hist[:, :, :, None]
         
-    #     def loss_fn(params, rng, x, y, mask):
-    #         preds = self.model.apply(params, x, train=True, rngs={"dropout": rng})
-    #         return quantile_loss(preds, y, self.quantiles)  # (B, T, D)
+        x_hist, (m, iqr) = self.robust_scaler(x_hist)
+        preds = self.model.apply(self.model_state.params, x_hist, t_hist, t_future, train=False)
+        preds = self.robust_scaler._inverse_scale(preds, m, iqr)
+        return preds
 
-    #     def _train_step(state, x, y, mask, rng):
-    #         loss, grads = jax.value_and_grad(loss_fn)(state.params, rng, x, y, mask)
-    #         updates, opt_state = self.optimizer.update(grads, state.opt_state, state.params)
-    #         params = optax.apply_updates(state.params, updates)
-    #         new_state = state.replace(params=params, opt_state=opt_state, step=state.step + 1)
-    #         return new_state, loss
+    def _next_rng(self):
+        self.key, rng = jax.random.split(self.key)
+        return rng
 
-    #     self._train_step = jax.jit(_train_step)
+    def save(self, path: str):
+        pickle.dump(self.model_state.params, open(path, "wb"))
 
-    # def train(self, batch: NpBatchTSContainer):
-        
-    #     for step in range(num_steps):
-    #         x, y, mask = dataset.sample_batch(batch_size)
-    #         x, y, mask = jnp.array(x), jnp.array(y), jnp.array(mask)
-            
-    #         self.model_state, loss = self._train_step(
-    #             self.model_state, x, y, mask, self._next_rng()
-    #         )
-    #         self.losses.append(float(loss))
-            
-    #         if step % log_every == 0:
-    #             print(f"Step {step:4d} | Loss: {loss:.6f}")
-        
-    #     print(f"Training complete. Final loss: {self.losses[-1]:.6f}")
-    #     return self.losses
-
-    # def predict(self, x: Array) -> Array:
-    #     """One-step ahead prediction."""
-    #     if x.ndim == 2:
-    #         x = x[:, :, None]
-    #     return self.model.apply(self.model_state.params, x, train=False)
-
-    # def generate(self, context: Array, n_steps: int = None) -> Array:
-    #     """Autoregressive generation from context.
-        
-    #     Args:
-    #         context: Initial context of shape (B, S, D) or (B, S)
-    #         n_steps: Number of steps to generate (default: config.max_new_steps)
-        
-    #     Returns:
-    #         Full sequence including context and generated steps: (B, S + n_steps, D)
-    #     """
-    #     n_steps = n_steps or self.config.max_new_steps
-        
-    #     # Ensure 3D input
-    #     if context.ndim == 2:
-    #         context = context[:, :, None]
-        
-    #     B, S, D = context.shape
-    #     buffer = jnp.concatenate([context, jnp.zeros((B, n_steps, D))], axis=1)
-
-    #     for i in range(n_steps):
-    #         ctx = buffer[:, i:i + S, :]
-    #         preds = self.model.apply(self.model_state.params, ctx, train=False)
-    #         next_val = preds[:, -1, :]  # (B, D)
-    #         buffer = buffer.at[:, S + i, :].set(next_val)
-        
-    #     return np.array(buffer)
-
-    # def _next_rng(self):
-    #     self.key, rng = jax.random.split(self.key)
-    #     return rng
-
-    # def save(self, path: str):
-    #     pickle.dump(self.model_state.params, open(path, "wb"))
-
-    # def load(self, path: str):
-    #     params = pickle.load(open(path, "rb"))
-    #     self.model_state = self.model_state.replace(params=params)
+    def load(self, path: str):
+        params = pickle.load(open(path, "rb"))
+        self.model_state = self.model_state.replace(params=params)
