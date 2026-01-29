@@ -35,6 +35,7 @@ def main():
     data_cfg = cfg.data
     dataset = ShardedDataset(
         root_path=Path(data_cfg.root_path),
+        time_features_path=Path(data_cfg.timefs_rootpth) if data_cfg.timefs_rootpth is not None else None
     )
     loader = DataLoader(
         dataset=dataset,

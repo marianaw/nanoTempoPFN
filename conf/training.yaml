@@ -22,6 +22,8 @@ training:
 # Data loading
 data:
   root_path: data
+  # timefs_rootpth: data_timefeatures
+  timefs_rootpth: null
   full_length: 2048
   future_length: 512
   seed: 42

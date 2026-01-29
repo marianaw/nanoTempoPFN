@@ -25,6 +25,7 @@ class GluonTSPredictor:
         self.prediction_length = prediction_length
         self.context_length = context_length
         self.time_dim = time_dim
+        self.lead_time = 0  # Required by GluonTS evaluator
 
     def predict(self, dataset, num_samples=None):
         """Generate quantile forecasts."""
@@ -68,7 +69,7 @@ def main():
     parser.add_argument("--checkpoint", required=True, help="Model checkpoint path")
     parser.add_argument("--config", default="conf/training.yaml", help="Config YAML path")
     parser.add_argument("--dataset", required=True, help="Dataset name or path")
-    parser.add_argument("--prediction-length", type=int, default=96, help="Forecast horizon")
+    parser.add_argument("--prediction-length", type=int, default=None, help="Forecast horizon (auto-detected if not specified)")
     parser.add_argument("--context-length", type=int, default=512, help="History length")
     args = parser.parse_args()
 
@@ -81,14 +82,6 @@ def main():
     forecaster.load(args.checkpoint)
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    # Create predictor
-    predictor = GluonTSPredictor(
-        forecaster=forecaster,
-        prediction_length=args.prediction_length,
-        context_length=args.context_length,
-        time_dim=training_config.time_dim,
-    )
-
     # Load dataset (supports GIFT-Eval or GluonTS datasets)
     try:
         from gift_eval import Dataset
@@ -100,6 +93,25 @@ def main():
         dataset = get_dataset(args.dataset)
         test_data = dataset.test
         print(f"Loaded GluonTS dataset: {args.dataset}")
+
+    # Extract prediction length from dataset if not specified
+    if args.prediction_length is None:
+        if hasattr(dataset, 'prediction_length'):
+            args.prediction_length = dataset.prediction_length
+        elif hasattr(dataset, 'metadata') and hasattr(dataset.metadata, 'prediction_length'):
+            args.prediction_length = dataset.metadata.prediction_length
+        else:
+            raise ValueError("Could not determine prediction_length from dataset. Please specify --prediction-length")
+
+    print(f"Using prediction length: {args.prediction_length}")
+
+    # Create predictor (after we know the prediction_length)
+    predictor = GluonTSPredictor(
+        forecaster=forecaster,
+        prediction_length=args.prediction_length,
+        context_length=args.context_length,
+        time_dim=training_config.time_dim,
+    )
 
     # Generate predictions
     print("Generating predictions...")
