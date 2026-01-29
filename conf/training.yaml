@@ -22,7 +22,6 @@ training:
 # Data loading
 data:
   root_path: data
-  batches_per_shard: 2
   full_length: 2048
   future_length: 512
   seed: 42

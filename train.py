@@ -35,13 +35,11 @@ def main():
     data_cfg = cfg.data
     dataset = ShardedDataset(
         root_path=Path(data_cfg.root_path),
-        batches_per_shard=data_cfg.batches_per_shard
     )
     loader = DataLoader(
         dataset=dataset,
         batch_size=training_config.batch_size,
         full_length=data_cfg.full_length,
-        future_length=data_cfg.future_length,
         seed=data_cfg.seed
     )
 

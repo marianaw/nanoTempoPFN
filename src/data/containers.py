@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 
 from .frequency import Frequency, parse_frequency
 
+
 def load_arrow_file(path):
     """
     Load a .arrow, .feather, or .parquet file using PyArrow.
@@ -28,6 +29,7 @@ def load_arrow_file(path):
         return pq.read_table(str(file_path))
     else:
         raise ValueError(f"Unsupported file extension: {ext}")
+
 
 @dataclass
 class NpBatchTSContainer:
@@ -61,13 +63,11 @@ class NpBatchTSContainer:
 class ShardedDataset:
 
     def __init__(self,
-                 root_path: Path = Path("data"),
-                 batches_per_shard: int = 2
+                 root_path: Path = Path("data")
                  ):
         self.root_path = root_path
         self.gen_types = ['gp', 'kernel', 'sinewave',
                           'sawtooth', 'step', 'spike', 'anomaly', 'ou_process']
-        self.batches_per_shard = batches_per_shard
         self.files_list = self._get_files_list()
         self.current_file_index = 0
 
@@ -92,26 +92,68 @@ class ShardedDataset:
         self.current_file_index = 0
 
 
+GIFT_EVAL_FORECAST_LENGTHS = {
+    48: 5,
+    720: 38,
+    480: 38,
+    30: 3,
+    300: 16,
+    8: 2,
+    120: 3,
+    450: 8,
+    80: 8,
+    12: 2,
+    900: 10,
+    180: 3,
+    600: 10,
+    60: 3,
+    210: 3,
+    195: 3,
+    140: 3,
+    130: 3,
+    14: 1,
+    18: 1,
+    13: 1,
+    6: 1,
+}
+
+
+def _sample_future_length():
+    return random.choices(list(GIFT_EVAL_FORECAST_LENGTHS.keys()),
+                          weights=list(GIFT_EVAL_FORECAST_LENGTHS.values()))[0]
+
+
 class DataLoader:
 
     def __init__(self, dataset: ShardedDataset, batch_size: int = 32,
-                 full_length: int = 2048, future_length: int = 512, seed: int = 42,
+                 full_length: int = 2048, seed: int = 42,
                  time_features_path: Path | None = None):
         self.dataset = dataset
         self.batch_size = batch_size
-        self.history_length = full_length - future_length
-        self.future_length = future_length
         self.time_features_path = time_features_path
+        self.full_length = full_length
 
         # Set the seed for reproducibility
         np.random.seed(seed)
         random.seed(seed)
         self.df = pd.DataFrame()  # Empty until __iter__ is called
         self.tf_df = pd.DataFrame()  # Time features dataframe
+        self._total_records = None  # Lazy computation of total records
+
+    def _compute_total_records(self) -> int:
+        """Compute total records across all sharded files."""
+        total_records = 0
+        for file_path in self.dataset.files_list:
+            table = load_arrow_file(file_path)
+            total_records += len(table)
+            del table  # Free memory immediately after counting
+        return total_records
 
     def __len__(self):
-        """Return approximate number of batches per epoch."""
-        return len(self.dataset.files_list) * self.dataset.batches_per_shard
+        """Return number of batches per epoch."""
+        if self._total_records is None:
+            self._total_records = self._compute_total_records()
+        return self._total_records // self.batch_size
 
     def __iter__(self):
         """Called at the start of each `for batch in loader:` loop."""
@@ -153,31 +195,38 @@ class DataLoader:
         values = np.transpose(values, (0, 2, 1))
 
         if values.ndim == 2:
-            values = values[:, :, None]  # (batch_size, seq_len, 1) if univariate. We add the channel dimension.
+            # (batch_size, seq_len, 1) if univariate. We add the channel dimension.
+            values = values[:, :, None]
 
-        values = values[:, :, None]  # (batch_size, seq_len, n_channels, 1) if univariate. We explicitely
-            # add a "univariate" feature dimension so that we can apply the embeddings without breaking shapes.
+        # (batch_size, seq_len, n_channels, 1) if univariate. We explicitely
+        values = values[:, :, None]
+        # add a "univariate" feature dimension so that we can apply the embeddings without breaking shapes.
 
-        history = values[:, :self.history_length, :]
-        future = values[:, self.history_length:self.history_length + self.future_length, :]
+        future_length = _sample_future_length()
+        history_length = self.full_length - future_length
+        history = values[:, :history_length, :]
+        future = values[:, history_length:history_length + future_length, :]
 
         start = batch_df["start"].tolist()
-        frequency = [parse_frequency(f) for f in batch_df["frequency"].tolist()]
+        frequency = [parse_frequency(f)
+                     for f in batch_df["frequency"].tolist()]
 
         # Extract time features if available
         history_tf = None
         future_tf = None
         if not self.tf_df.empty:
             tf_batch = self.tf_df[self.tf_df['start'].isin(batch_df['start']) &
-                                   self.tf_df['frequency'].isin(batch_df['frequency'])]
+                                  self.tf_df['frequency'].isin(batch_df['frequency'])]
             if len(tf_batch) == len(batch_df):
                 history_tf_list = []
                 future_tf_list = []
                 for _, row in tf_batch.iterrows():
                     h_shape = tuple(row['history_shape'])
                     f_shape = tuple(row['future_shape'])
-                    history_tf_list.append(np.frombuffer(row['history_features'], dtype=np.float64).reshape(h_shape))
-                    future_tf_list.append(np.frombuffer(row['future_features'], dtype=np.float64).reshape(f_shape))
+                    history_tf_list.append(np.frombuffer(
+                        row['history_features'], dtype=np.float64).reshape(h_shape))
+                    future_tf_list.append(np.frombuffer(
+                        row['future_features'], dtype=np.float64).reshape(f_shape))
                 history_tf = np.stack(history_tf_list)
                 future_tf = np.stack(future_tf_list)
 
