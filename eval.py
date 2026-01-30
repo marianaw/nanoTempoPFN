@@ -15,11 +15,11 @@ from src.data.frequency import parse_frequency
 class TestDataset:
     """Split time series into non-overlapping windows."""
 
-    def __init__(self, data, context_length, prediction_length, max_windows=20):
+    def __init__(self, data, context_length, prediction_length, max_windows_per_series=20):
         self.data = list(data)
         self.context_length = context_length
         self.prediction_length = prediction_length
-        self.max_windows = max_windows
+        self.max_windows_per_series = max_windows_per_series
         self.window_size = context_length + prediction_length
 
     def create_windows(self):
@@ -31,7 +31,7 @@ class TestDataset:
 
             # Calculate how many windows we can fit
             max_possible = (len(target) - self.window_size) // self.prediction_length + 1
-            num_windows = min(max_possible, self.max_windows)
+            num_windows = min(max_possible, self.max_windows_per_series)
 
             # Create windows working backwards from end
             for i in range(num_windows):
@@ -66,7 +66,7 @@ def main():
     parser.add_argument("--config", default="conf/training.yaml", help="Config path")
     parser.add_argument("--dataset", default="electricity", help="Dataset name")
     parser.add_argument("--context-length", type=int, default=512, help="Context length")
-    parser.add_argument("--max-windows", type=int, default=20, help="Max windows per series")
+    parser.add_argument("--max-windows-per-series", type=int, default=100, help="Max windows per series")
     args = parser.parse_args()
 
     # Load dataset
@@ -93,7 +93,7 @@ def main():
         data=test_data,
         context_length=args.context_length,
         prediction_length=prediction_length,
-        max_windows=args.max_windows
+        max_windows_per_series=args.max_windows_per_series
     )
     windows = test_dataset.create_windows()
     print(f"Created {len(windows)} windows")
