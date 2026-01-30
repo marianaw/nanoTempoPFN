@@ -12,6 +12,7 @@ import pyarrow.parquet as pq
 
 from .frequency import Frequency, parse_frequency
 
+
 def load_arrow_file(path):
     """
     Load a .arrow, .feather, or .parquet file using PyArrow.
@@ -28,6 +29,7 @@ def load_arrow_file(path):
         return pq.read_table(str(file_path))
     else:
         raise ValueError(f"Unsupported file extension: {ext}")
+
 
 @dataclass
 class NpBatchTSContainer:
@@ -62,12 +64,12 @@ class ShardedDataset:
 
     def __init__(self,
                  root_path: Path = Path("data"),
-                 batches_per_shard: int = 2
+                 time_features_path: Path | None = None
                  ):
         self.root_path = root_path
+        self.time_features_path = time_features_path
         self.gen_types = ['gp', 'kernel', 'sinewave',
                           'sawtooth', 'step', 'spike', 'anomaly', 'ou_process']
-        self.batches_per_shard = batches_per_shard
         self.files_list = self._get_files_list()
         self.current_file_index = 0
 
@@ -79,11 +81,22 @@ class ShardedDataset:
             files_list.extend(files)
         return files_list
 
-    def load_in_memory(self) -> pd.DataFrame:
+    def load_in_memory(self) -> tuple[pa.Table, pa.Table | None]:
+        """Load data and optionally time features. Returns (data_table, tf_table)."""
         try:
             file = self.files_list[self.current_file_index]
             self.current_file_index += 1
-            return load_arrow_file(file)
+
+            data_table = load_arrow_file(file)
+
+            # Load time features if path is provided
+            tf_table = None
+            if self.time_features_path is not None:
+                tf_file = self.time_features_path / file.parent.name / file.name
+                if tf_file.exists():
+                    tf_table = load_arrow_file(tf_file)
+
+            return data_table, tf_table
         except IndexError:
             raise StopIteration("No more files to load")
 
@@ -92,26 +105,66 @@ class ShardedDataset:
         self.current_file_index = 0
 
 
+GIFT_EVAL_FORECAST_LENGTHS = {
+    48: 5,
+    720: 38,
+    480: 38,
+    30: 3,
+    300: 16,
+    8: 2,
+    120: 3,
+    450: 8,
+    80: 8,
+    12: 2,
+    900: 10,
+    180: 3,
+    600: 10,
+    60: 3,
+    210: 3,
+    195: 3,
+    140: 3,
+    130: 3,
+    14: 1,
+    18: 1,
+    13: 1,
+    6: 1,
+}
+
+
+def _sample_future_length():
+    return random.choices(list(GIFT_EVAL_FORECAST_LENGTHS.keys()),
+                          weights=list(GIFT_EVAL_FORECAST_LENGTHS.values()))[0]
+
+
 class DataLoader:
 
     def __init__(self, dataset: ShardedDataset, batch_size: int = 32,
-                 full_length: int = 2048, future_length: int = 512, seed: int = 42,
-                 time_features_path: Path | None = None):
+                 full_length: int = 2048, seed: int = 42):
         self.dataset = dataset
         self.batch_size = batch_size
-        self.history_length = full_length - future_length
-        self.future_length = future_length
-        self.time_features_path = time_features_path
+        self.full_length = full_length
 
         # Set the seed for reproducibility
         np.random.seed(seed)
         random.seed(seed)
         self.df = pd.DataFrame()  # Empty until __iter__ is called
         self.tf_df = pd.DataFrame()  # Time features dataframe
+        self._total_records = None  # Lazy computation of total records
+
+    def _compute_total_records(self) -> int:
+        """Compute total records across all sharded files."""
+        total_records = 0
+        for file_path in self.dataset.files_list:
+            table = load_arrow_file(file_path)
+            total_records += len(table)
+            del table  # Free memory immediately after counting
+        return total_records
 
     def __len__(self):
-        """Return approximate number of batches per epoch."""
-        return len(self.dataset.files_list) * self.dataset.batches_per_shard
+        """Return number of batches per epoch."""
+        if self._total_records is None:
+            self._total_records = self._compute_total_records()
+        return self._total_records // self.batch_size
 
     def __iter__(self):
         """Called at the start of each `for batch in loader:` loop."""
@@ -120,21 +173,19 @@ class DataLoader:
         return self
 
     def _load_dataset_from_memory(self):
-        # Load next file, convert to pandas
-        table = self.dataset.load_in_memory()  # Raises StopIteration when exhausted
-        df = table.to_pandas()
+        # Load data and time features from dataset
+        data_table, tf_table = self.dataset.load_in_memory()
+
+        # Convert data to pandas
+        df = data_table.to_pandas()
         df['values'] = df['values'].map(lambda x: np.stack(x))
         self.df = df
 
-        # Load time features if path is specified
-        if self.time_features_path is not None:
-            current_file = self.dataset.files_list[self.dataset.current_file_index - 1]
-            tf_file = self.time_features_path / current_file.parent.name / current_file.name
-            if tf_file.exists():
-                tf_table = load_arrow_file(tf_file)
-                self.tf_df = tf_table.to_pandas()
-            else:
-                self.tf_df = pd.DataFrame()
+        # Convert time features to pandas if available
+        if tf_table is not None:
+            self.tf_df = tf_table.to_pandas()
+        else:
+            self.tf_df = pd.DataFrame()
 
     def __next__(self) -> NpBatchTSContainer:
         # Not enough samples left, try loading next file
@@ -142,44 +193,54 @@ class DataLoader:
             self._load_dataset_from_memory()  # Raises StopIteration when no more files
 
         batch_df = self.df.sample(n=self.batch_size)
+
+        # Sample time features with same indices
+        batch_tf_df = None
+        if not self.tf_df.empty:
+            batch_tf_df = self.tf_df.loc[batch_df.index]
+            self.tf_df = self.tf_df.drop(batch_df.index)
+
         # Drop sampled rows to avoid repetition
         self.df = self.df.drop(batch_df.index)
 
-        return self._to_np_container(batch_df)
+        return self._to_np_container(batch_df, batch_tf_df)
 
-    def _to_np_container(self, batch_df: pd.DataFrame) -> NpBatchTSContainer:
+    def _to_np_container(self, batch_df: pd.DataFrame, batch_tf_df: pd.DataFrame | None = None) -> NpBatchTSContainer:
         # Stack values into array: (batch_size, seq_len, 1)
         values = np.stack(batch_df["values"].values)
         values = np.transpose(values, (0, 2, 1))
 
         if values.ndim == 2:
-            values = values[:, :, None]  # (batch_size, seq_len, 1) if univariate. We add the channel dimension.
+            # (batch_size, seq_len, 1) if univariate. We add the channel dimension.
+            values = values[:, :, None]
 
-        values = values[:, :, None]  # (batch_size, seq_len, n_channels, 1) if univariate. We explicitely
-            # add a "univariate" feature dimension so that we can apply the embeddings without breaking shapes.
+        # (batch_size, seq_len, n_channels, 1) if univariate. We explicitely
+        values = values[:, :, None]
+        # add a "univariate" feature dimension so that we can apply the embeddings without breaking shapes.
 
-        history = values[:, :self.history_length, :]
-        future = values[:, self.history_length:self.history_length + self.future_length, :]
+        # Sample future length and split
+        future_length = _sample_future_length()
+        history_length = self.full_length - future_length
+        history = values[:, :history_length, :]
+        future = values[:, history_length:history_length + future_length, :]
 
         start = batch_df["start"].tolist()
-        frequency = [parse_frequency(f) for f in batch_df["frequency"].tolist()]
+        frequency = [parse_frequency(f)
+                     for f in batch_df["frequency"].tolist()]
 
-        # Extract time features if available
+        # Split time features using the same history/future lengths
         history_tf = None
         future_tf = None
-        if not self.tf_df.empty:
-            tf_batch = self.tf_df[self.tf_df['start'].isin(batch_df['start']) &
-                                   self.tf_df['frequency'].isin(batch_df['frequency'])]
-            if len(tf_batch) == len(batch_df):
-                history_tf_list = []
-                future_tf_list = []
-                for _, row in tf_batch.iterrows():
-                    h_shape = tuple(row['history_shape'])
-                    f_shape = tuple(row['future_shape'])
-                    history_tf_list.append(np.frombuffer(row['history_features'], dtype=np.float64).reshape(h_shape))
-                    future_tf_list.append(np.frombuffer(row['future_features'], dtype=np.float64).reshape(f_shape))
-                history_tf = np.stack(history_tf_list)
-                future_tf = np.stack(future_tf_list)
+        if batch_tf_df is not None:
+            history_tf_list = []
+            future_tf_list = []
+            for _, row in batch_tf_df.iterrows():
+                time_features = np.array(row['time_features'])
+                history_tf_list.append(time_features[:history_length])
+                future_tf_list.append(time_features[history_length:history_length + future_length])
+
+            history_tf = np.stack(history_tf_list)
+            future_tf = np.stack(future_tf_list)
 
         return NpBatchTSContainer(
             history=history,

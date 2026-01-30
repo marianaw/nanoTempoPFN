@@ -36,9 +36,29 @@ class WeavingLSTM(nn.Module):
 
     @nn.compact
     def __call__(self, x, c_state, n_state, m_state, training=True):
-        # x here should be the concatenation of the encoded history and the target pos embedding, shape (B*num_channels, len_history+len_target, embedding_dim)
+        # x: (B*num_channels, seq_len, d_model)
+        d_model = x.shape[-1]
+
         for i in range(self.config.n_layers):
-            x, (c_state, n_state, m_state) = mLSTMWeavingLayer(config=self.config.weaving_layer_config)(x, c_state, n_state, m_state, training)
+            # Pre-norm + mLSTM layer
+            x_norm = nn.LayerNorm()(x)
+            dx, (c_state, n_state, m_state) = mLSTMWeavingLayer(config=self.config.weaving_layer_config)(
+                x_norm, c_state, n_state, m_state, training
+            )
+            # Project dx to match x dimension if needed
+            if dx.shape[-1] != d_model:
+                dx = nn.Dense(d_model, use_bias=False)(dx)
+            x = x + dx
+
+            # Pre-norm + MLP
+            x_norm = nn.LayerNorm()(x)
+            dx = nn.Dense(d_model * 4)(x_norm)
+            dx = nn.gelu(dx)
+            dx = nn.Dense(d_model)(dx)
+            x = x + dx
+
+        # Final norm
+        x = nn.LayerNorm()(x)
 
         return x, (c_state, n_state, m_state)
 
@@ -61,8 +81,8 @@ class ModelConfig:
 
 
 def _handle_missing_data(x):
-    """TODO: we need to do something about nans here"""
-    return x
+    """Replace NaN values with zeros."""
+    return jnp.where(jnp.isnan(x), 0.0, x)
 
 
 class xLSTMTSModel(nn.Module):
@@ -171,10 +191,13 @@ class TimeSeriesForecaster:
 
         params = self.model.init(self._next_rng(), x, t_hist, t_future)
 
-        # Optimizer
-        self.optimizer = optax.adamw(
-            learning_rate=self.config.learning_rate, 
-            weight_decay=self.config.weight_decay
+        # Optimizer with gradient clipping
+        self.optimizer = optax.chain(
+            optax.clip_by_global_norm(1.0),
+            optax.adamw(
+                learning_rate=self.config.learning_rate,
+                weight_decay=self.config.weight_decay
+            )
         )
 
         # Model state
@@ -192,10 +215,10 @@ class TimeSeriesForecaster:
         
         def loss_fn(params, rng, x, t_hist, t_future, y, mask=None):
             x = _handle_missing_data(x)
-            x, (m, iqr) = self.robust_scaler.scale(x)
-            preds = self.model.apply(params, x, t_hist, t_future, training=True, rngs={"dropout": rng})
-            preds = self.robust_scaler.inverse_scale(preds, m, iqr)
-            return quantile_loss(preds, y, self.quantiles)  # (B, T, D)
+            x_scaled, (m, iqr) = self.robust_scaler.scale(x)
+            y_scaled, _ = self.robust_scaler.scale(y, stats=(m, iqr))
+            preds = self.model.apply(params, x_scaled, t_hist, t_future, training=True, rngs={"dropout": rng})
+            return quantile_loss(preds, y_scaled, self.quantiles)
 
         def _train_step(state, x, t_hist, t_future, y, mask, rng):
             loss, grads = jax.value_and_grad(loss_fn)(state.params, rng, x, t_hist, t_future, y, mask)
@@ -222,9 +245,25 @@ class TimeSeriesForecaster:
 
         x, y = batch.history, batch.future
 
+        # Check for NaN or inf in inputs
+        if jnp.isnan(x).any():
+            print(f"WARNING: NaN detected in input x at step {self.model_state.step}")
+        if jnp.isinf(x).any():
+            print(f"WARNING: Inf detected in input x at step {self.model_state.step}")
+        if jnp.isnan(y).any():
+            print(f"WARNING: NaN detected in target y at step {self.model_state.step}")
+        if jnp.isinf(y).any():
+            print(f"WARNING: Inf detected in target y at step {self.model_state.step}")
+
         self.model_state, loss = self._train_step(
             self.model_state, x, history_tf, future_tf, y, None, self._next_rng()
         )
+
+        # Check for NaN in loss
+        if jnp.isnan(loss):
+            print(f"ERROR: NaN loss at step {self.model_state.step}")
+            print(f"  Input stats: min={jnp.min(x):.4f}, max={jnp.max(x):.4f}, mean={jnp.mean(x):.4f}")
+            print(f"  Target stats: min={jnp.min(y):.4f}, max={jnp.max(y):.4f}, mean={jnp.mean(y):.4f}")
 
         return loss.item()
 
@@ -241,10 +280,10 @@ class TimeSeriesForecaster:
     def predict(self, x_hist: Array, t_hist: Array, t_future: Array) -> Array:
         if x_hist.ndim == 3:
             x_hist = x_hist[:, :, :, None]
-        
-        x_hist, (m, iqr) = self.robust_scaler(x_hist)
-        preds = self.model.apply(self.model_state.params, x_hist, t_hist, t_future, train=False)
-        preds = self.robust_scaler._inverse_scale(preds, m, iqr)
+
+        x_hist, (m, iqr) = self.robust_scaler.scale(x_hist)
+        preds = self.model.apply(self.model_state.params, x_hist, t_hist, t_future, training=False)
+        preds = self.robust_scaler.inverse_scale(preds, m, iqr)
         return preds
 
     def _next_rng(self):

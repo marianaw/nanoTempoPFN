@@ -18,7 +18,7 @@ def main():
     parser.add_argument(
         "--save-path",
         type=str,
-        default="model_checkpoint.pkl",
+        default="checkpoints/toy_model.pkl",
         help="Path to save trained model"
     )
     args = parser.parse_args()
@@ -35,13 +35,12 @@ def main():
     data_cfg = cfg.data
     dataset = ShardedDataset(
         root_path=Path(data_cfg.root_path),
-        batches_per_shard=data_cfg.batches_per_shard
+        time_features_path=Path(data_cfg.timefs_rootpth) if data_cfg.timefs_rootpth is not None else None
     )
     loader = DataLoader(
         dataset=dataset,
         batch_size=training_config.batch_size,
         full_length=data_cfg.full_length,
-        future_length=data_cfg.future_length,
         seed=data_cfg.seed
     )
 

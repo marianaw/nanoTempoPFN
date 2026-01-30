@@ -33,8 +33,9 @@ def weaving_recurrent_lstm(q: jax.Array, k: jax.Array, v: jax.Array, igate_preac
         # gates
         log_fg_act = jax.nn.log_sigmoid(fgate_preact)  # (B, NH, 1, 1)
 
-        # update rule
+        # update rule with numerical stability
         m_state_new = jnp.maximum(log_fg_act + m_state, igate_preact)  # (B, NH, 1, 1)
+        m_state_new = jnp.clip(m_state_new, -30.0, 30.0)  # Prevent overflow
 
         fg_act = jnp.exp(log_fg_act + m_state - m_state_new)  # (B, NH, 1, 1)
         ig_act = jnp.exp(igate_preact - m_state_new)  # (B, NH, 1, 1)
@@ -49,6 +50,7 @@ def weaving_recurrent_lstm(q: jax.Array, k: jax.Array, v: jax.Array, igate_preac
         qn_dotproduct = q @ n_state_new  # (B, NH, 1, 1)
         max_val = jnp.exp(-m_state_new)  # (B, NH, 1, 1)
         h_denom = jnp.maximum(jnp.abs(qn_dotproduct), max_val) + eps
+        h_denom = jnp.maximum(h_denom, 1e-6)  # Ensure minimum denominator
         h = h_num / h_denom  # (B, NH, 1, DH) / (B, NH, 1, 1) = (B, NH, 1, DH)
 
         h = h.squeeze(axis=2)  # (B, NH, DH)

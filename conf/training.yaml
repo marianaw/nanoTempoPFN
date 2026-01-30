@@ -16,13 +16,14 @@ training:
   learning_rate: 1e-3
   weight_decay: 0.0
   batch_size: 32
-  num_epochs: 21
+  num_epochs: 1
   log_every: 10
 
 # Data loading
 data:
   root_path: data
-  batches_per_shard: 2
+  # timefs_rootpth: data_timefeatures
+  timefs_rootpth: null
   full_length: 2048
   future_length: 512
   seed: 42
