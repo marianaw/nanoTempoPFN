@@ -156,7 +156,7 @@ def main():
     for i, q in enumerate(quantiles):
         q_preds = all_preds[:, :, i]
         loss = quantile_loss(all_targets, q_preds, q)
-        quantile_losses[q] = loss
+        quantile_losses[q.item()] = loss
 
     avg_ql = np.mean(list(quantile_losses.values()))
 
