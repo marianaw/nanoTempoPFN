@@ -282,7 +282,7 @@ class TimeSeriesForecaster:
             x_hist = x_hist[:, :, :, None]
 
         x_hist, (m, iqr) = self.robust_scaler.scale(x_hist)
-        preds = self.model.apply(self.model_state.params, x_hist, t_hist, t_future, train=False)
+        preds = self.model.apply(self.model_state.params, x_hist, t_hist, t_future, training=False)
         preds = self.robust_scaler.inverse_scale(preds, m, iqr)
         return preds
 
