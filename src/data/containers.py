@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 import random
+from abc import ABC, abstractmethod
+from typing import Iterator
 
 import numpy as np
 import jax.numpy as jnp
@@ -29,6 +31,24 @@ def load_arrow_file(path):
         return pq.read_table(str(file_path))
     else:
         raise ValueError(f"Unsupported file extension: {ext}")
+
+
+class BatchContainerLoader(ABC):
+    """Abstract base class for loaders that yield NpBatchTSContainer.
+
+    Loaders should handle reshuffling/regeneration automatically when
+    __iter__ is called multiple times (e.g., across epochs).
+    """
+
+    @abstractmethod
+    def __len__(self) -> int:
+        """Return number of batches per epoch."""
+        pass
+
+    @abstractmethod
+    def __iter__(self) -> Iterator['NpBatchTSContainer']:
+        """Yield batches as NpBatchTSContainer."""
+        pass
 
 
 @dataclass
@@ -183,7 +203,9 @@ class DataLoader:
 
         # Convert time features to pandas if available
         if tf_table is not None:
-            self.tf_df = tf_table.to_pandas()
+            tf_df = tf_table.to_pandas()
+            tf_df['time_features'] = tf_df.time_features.map(lambda x: np.stack(x))
+            self.tf_df = tf_df
         else:
             self.tf_df = pd.DataFrame()
 
