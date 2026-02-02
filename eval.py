@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Minimal windowed evaluation on GIFT-Eval datasets."""
+"""Minimal windowed evaluation on GIFT-Eval datasets using GluonTS evaluate_model."""
 
 import argparse
 import numpy as np
 import jax.numpy as jnp
+from typing import Iterator
 from gluonts.dataset.repository import get_dataset
+from gluonts.dataset.split import split
+from gluonts.model.predictor import Predictor
+from gluonts.model.forecast import QuantileForecast
+from gluonts.model.evaluation import evaluate_model
+from gluonts.ev.metrics import MAE, MSE, MASE
+from gluonts.time_feature import get_seasonality
 
 from src.config import load_config, cfg_to_training_config
 from src.tsf import TimeSeriesForecaster
@@ -12,52 +19,62 @@ from src.data.time_features import compute_batch_time_features
 from src.data.frequency import parse_frequency
 
 
-class TestDataset:
-    """Split time series into non-overlapping windows."""
+class TempoPredictorWrapper(Predictor):
+    """Wrapper to make TimeSeriesForecaster compatible with GluonTS Predictor interface."""
 
-    def __init__(self, data, context_length, prediction_length, max_windows_per_series=20):
-        self.data = list(data)
-        self.context_length = context_length
+    def __init__(self, forecaster, prediction_length, context_length, freq, time_dim):
+        # super().__init__(prediction_length, freq)
+        self.forecaster = forecaster
         self.prediction_length = prediction_length
-        self.max_windows_per_series = max_windows_per_series
-        self.window_size = context_length + prediction_length
+        self.context_length = context_length
+        self.freq = freq
+        self.time_dim = time_dim
+        self.frequency = parse_frequency(freq)
+        self.quantiles = forecaster.quantiles
 
-    def create_windows(self):
-        """Generate (context, target, metadata) tuples."""
-        windows = []
+    def predict(self, dataset, num_samples=None) -> Iterator[QuantileForecast]:
+        """Generate forecasts for the test data."""
+        for entry in dataset:
+            # Extract target and metadata
+            target = np.array(entry['target'])
+            start = entry['start']
+            item_id = entry.get('item_id', '')
 
-        for ts in self.data:
-            target = np.array(ts['target'])
+            # Use last context_length points as context
+            context = target[-self.context_length:]
+            context_jnp = jnp.array(context[None, ..., None, None])
 
-            # Calculate how many windows we can fit
-            max_possible = (len(target) - self.window_size) // self.prediction_length + 1
-            num_windows = min(max_possible, self.max_windows_per_series)
+            # Compute time features - start from the beginning of context
+            context_start_offset = len(target) - self.context_length
+            history_tf, future_tf = compute_batch_time_features(
+                # start=[np.datetime64(start) + np.timedelta64(context_start_offset, self.frequency.timedelta_unit)],
+                start=[np.datetime64(start)],
+                history_length=self.context_length,
+                future_length=self.prediction_length,
+                batch_size=1,
+                frequency=[self.frequency],
+                K_max=self.time_dim,
+                include_extra=False,
+            )
 
-            # Create windows working backwards from end
-            for i in range(num_windows):
-                end_idx = len(target) - i * self.prediction_length
-                start_idx = end_idx - self.window_size
+            # Predict
+            preds = self.forecaster.predict(context_jnp, history_tf, future_tf)
+            preds = np.array(preds[0, :, 0, :])  # (pred_len, num_quantiles)
 
-                if start_idx < 0:
-                    break
+            # Create forecast start (after full target)
+            forecast_start = start + len(target)
 
-                context = target[start_idx:start_idx + self.context_length]
-                pred_target = target[start_idx + self.context_length:end_idx]
+            # Build forecast array: (num_quantiles+1, pred_len)
+            mean_pred = preds.mean(axis=1, keepdims=True).T
+            forecast_array = np.concatenate([preds.T, mean_pred], axis=0)
 
-                windows.append({
-                    'context': context,
-                    'target': pred_target,
-                    'start': ts['start'],
-                    'item_id': ts.get('item_id', '')
-                })
-
-        return windows
-
-
-def quantile_loss(y_true, y_pred, quantile):
-    """Compute quantile loss."""
-    error = y_true - y_pred
-    return np.mean(np.maximum(quantile * error, (quantile - 1) * error))
+            # Create QuantileForecast
+            yield QuantileForecast(
+                forecast_arrays=forecast_array,
+                start_date=forecast_start,
+                forecast_keys=[str(q.item()) for q in self.quantiles] + ['mean'],
+                item_id=item_id
+            )
 
 
 def main():
@@ -66,18 +83,18 @@ def main():
     parser.add_argument("--config", default="conf/training.yaml", help="Config path")
     parser.add_argument("--dataset", default="electricity", help="Dataset name")
     parser.add_argument("--context-length", type=int, default=512, help="Context length")
-    parser.add_argument("--max-windows-per-series", type=int, default=100, help="Max windows per series")
+    parser.add_argument("--windows", type=int, default=10, help="Number of windows per series")
     args = parser.parse_args()
 
     # Load dataset
     print(f"Loading dataset: {args.dataset}")
     dataset = get_dataset(args.dataset)
-    test_data = dataset.test
 
     # Get metadata
     freq = dataset.metadata.freq
     prediction_length = dataset.metadata.prediction_length
-    print(f"Frequency: {freq}, Prediction length: {prediction_length}")
+    seasonality = get_seasonality(freq)
+    print(f"Frequency: {freq}, Prediction length: {prediction_length}, Seasonality: {seasonality}")
 
     # Load model
     print(f"Loading config: {args.config}")
@@ -88,86 +105,39 @@ def main():
     forecaster.load(args.checkpoint)
     print(f"Loaded checkpoint: {args.checkpoint}")
 
-    # Create test windows
-    test_dataset = TestDataset(
-        data=test_data,
-        context_length=args.context_length,
+    # Create test split with windowing
+    # Split creates train/test, then generate_instances creates multiple windows
+    _, test_template = split(dataset.test, offset=-prediction_length * args.windows)
+    test_data = test_template.generate_instances(
         prediction_length=prediction_length,
-        max_windows_per_series=args.max_windows_per_series
+        windows=args.windows,
+        distance=prediction_length,
     )
-    windows = test_dataset.create_windows()
-    print(f"Created {len(windows)} windows")
 
-    # Parse frequency once
-    frequency = parse_frequency(freq)
-    quantiles = forecaster.quantiles
+    print(f"Created test split with {args.windows} windows per series")
 
-    # Run predictions
-    print("Running predictions...")
-    predictions = []
-    targets = []
+    # Create predictor wrapper
+    predictor = TempoPredictorWrapper(
+        forecaster=forecaster,
+        prediction_length=prediction_length,
+        context_length=args.context_length,
+        freq=freq,
+        time_dim=training_config.time_dim
+    )
 
-    for i, window in enumerate(windows):
-        if i % 100 == 0:
-            print(f"  {i}/{len(windows)}")
-
-        # Prepare context
-        context = jnp.array(window['context'][None, ..., None, None])
-
-        # Compute time features
-        history_tf, future_tf = compute_batch_time_features(
-            start=[np.datetime64(window['start'])],
-            history_length=args.context_length,
-            future_length=prediction_length,
-            batch_size=1,
-            frequency=[frequency],
-            K_max=training_config.time_dim,
-            include_extra=False,
-        )
-
-        # Predict
-        preds = forecaster.predict(context, history_tf, future_tf)
-        preds = np.array(preds[0, :, 0, :])  # (pred_len, num_quantiles)
-
-        predictions.append(preds)
-        targets.append(window['target'])
-
-    # Stack results
-    all_preds = np.stack(predictions)  # (num_windows, pred_len, num_quantiles)
-    all_targets = np.stack(targets)    # (num_windows, pred_len)
-
-    print(f"\nPredictions shape: {all_preds.shape}")
-    print(f"Targets shape: {all_targets.shape}")
-
-    # Compute metrics
-    print("\n=== Computing Metrics ===")
-
-    # MSE (median)
-    median_idx = list(quantiles).index(0.5)
-    median_preds = all_preds[:, :, median_idx]
-    mse_median = np.mean((median_preds - all_targets) ** 2)
-
-    # MSE (mean)
-    mean_preds = np.mean(all_preds, axis=2)
-    mse_mean = np.mean((mean_preds - all_targets) ** 2)
-
-    # Quantile losses
-    quantile_losses = {}
-    for i, q in enumerate(quantiles):
-        q_preds = all_preds[:, :, i]
-        loss = quantile_loss(all_targets, q_preds, q)
-        quantile_losses[q.item()] = loss
-
-    avg_ql = np.mean(list(quantile_losses.values()))
+    # Evaluate using GluonTS evaluate_model
+    print("\n=== Evaluating ===")
+    metrics_df = evaluate_model(
+        model=predictor,
+        test_data=test_data,
+        metrics=[MAE(), MSE(), MASE()],
+        seasonality=seasonality,
+        axis=None
+    )
 
     # Print results
     print("\n=== Results ===")
-    print(f"MSE (median): {mse_median:.4f}")
-    print(f"MSE (mean): {mse_mean:.4f}")
-    print(f"Avg Quantile Loss: {avg_ql:.4f}")
-    print("\nPer-Quantile Losses:")
-    for q, loss in quantile_losses.items():
-        print(f"  Q{q}: {loss:.4f}")
+    print(metrics_df.to_string())
 
 
 if __name__ == "__main__":
