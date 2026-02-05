@@ -251,7 +251,7 @@ class TimeSeriesForecaster:
 
         return loss.item()
 
-    def train(self, loader: DataLoader, num_epochs: int) -> list[float]:
+    def train(self, loader: DataLoader, num_epochs: int, checkpoint_path: str = None) -> list[float]:
         losses = []
 
         for epoch in tqdm(range(num_epochs)):
@@ -268,6 +268,10 @@ class TimeSeriesForecaster:
             print(f"  Epoch {epoch + 1} - Avg Loss: {avg_loss:.4f}")
             losses.append(avg_loss)
 
+            # Save checkpoint after each epoch (overwrites previous safely)
+            if checkpoint_path:
+                self._safe_save(checkpoint_path)
+
     def predict(self, x_hist: Array, t_hist: Array, t_future: Array) -> Array:
         if x_hist.ndim == 3:
             x_hist = x_hist[:, :, :, None]
@@ -281,9 +285,18 @@ class TimeSeriesForecaster:
         self.key, rng = jax.random.split(self.key)
         return rng
 
+    def _safe_save(self, path: str):
+        """Save checkpoint safely: write to temp file first, then rename."""
+        import os
+        temp_path = path + ".tmp"
+        pickle.dump(self.model_state.params, open(temp_path, "wb"))
+        os.replace(temp_path, path)  # Atomic operation
+
     def save(self, path: str):
-        pickle.dump(self.model_state.params, open(path, "wb"))
+        """Save model parameters to file."""
+        self._safe_save(path)
 
     def load(self, path: str):
+        """Load model parameters from file."""
         params = pickle.load(open(path, "rb"))
         self.model_state = self.model_state.replace(params=params)

@@ -1,0 +1,22 @@
+# JAX with CUDA support (for GPU)
+--find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+jax[cuda12_pip]
+
+# Core ML/Scientific libraries
+flax>=0.7.0
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Time series and data
+gluonts>=0.14.0
+
+# Configuration
+omegaconf>=2.3.0
+pyyaml>=6.0
+
+# Utilities
+tqdm>=4.65.0
+
+# Data
+pyarrow>=14.0.0
+pandas>=2.1.0

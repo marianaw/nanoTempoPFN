@@ -53,12 +53,9 @@ def main():
     # Training loop
     num_epochs = training_config.num_epochs
     print(f"\nStarting training for {num_epochs} epochs...")
-    forecaster.train(loader, num_epochs=num_epochs)
-
-    # Save model
-    print(f"\nSaving model to {args.save_path}...")
-    forecaster.save(args.save_path)
-    print("Training complete!")
+    print(f"Checkpoints will be saved to {args.save_path} after each epoch")
+    forecaster.train(loader, num_epochs=num_epochs, checkpoint_path=args.save_path)
+    print("\nTraining complete!")
 
 if __name__ == "__main__":
     main()

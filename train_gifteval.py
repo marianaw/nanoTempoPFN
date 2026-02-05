@@ -204,7 +204,7 @@ def main():
     forecaster.train(loader, num_epochs=args.epochs)
 
     print("\n=== Training Complete ===")
-    final_path = output_dir / "model_final.pkl"
+    final_path = output_dir / "model_gifteval_final.pkl"
     forecaster.save(str(final_path))
     print(f"Final model saved: {final_path}")
 
