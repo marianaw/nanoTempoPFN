@@ -58,5 +58,6 @@ RUN mkdir -p /workspace/checkpoints /workspace/persistent
 ENV PYTHONPATH=/workspace
 # ENV PYTHONPATH=/workspace:$PYTHONPATH
 
-# Default command (can be overridden in RunPod)
-CMD ["python3", "train.py", "--save-path", "/workspace/checkpoints/pretrained_model.pkl"]
+# Default command - Keep container alive for interactive use
+# Run training manually after uploading data
+CMD ["sleep", "infinity"]
