@@ -1,6 +1,6 @@
-# JAX with CUDA support (for GPU)
---find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
-jax[cuda12_pip]
+# JAX with CUDA support (for GPU) - Explicit CUDA installation
+jax[cuda12]>=0.4.30
+jaxlib>=0.4.30
 
 # Core ML/Scientific libraries
 flax>=0.7.0

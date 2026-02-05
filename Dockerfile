@@ -32,10 +32,13 @@ RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
 # Upgrade pip
 RUN python3.12 -m pip install --no-cache-dir --upgrade pip
 
+# Install JAX with CUDA support FIRST (explicit installation required)
+RUN python3.12 -m pip install --no-cache-dir --upgrade "jax[cuda12]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+
 # Copy requirements first for better caching
 COPY requirements.txt /workspace/
 
-# Install Python dependencies
+# Install other Python dependencies
 RUN python3.12 -m pip install --no-cache-dir -r requirements.txt
 
 # Clone xlstm-jax library (shallow clone for speed)
