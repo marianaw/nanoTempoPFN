@@ -232,8 +232,8 @@ class TimeSeriesForecaster:
     def train_step(self, batch: NpBatchTSContainer) -> float:
         # Use preloaded time features if available, otherwise compute
         if batch.history_time_features is not None and batch.future_time_features is not None:
-            history_tf = batch.history_time_features
-            future_tf = batch.future_time_features
+            history_tf = jnp.array(batch.history_time_features)
+            future_tf = jnp.array(batch.future_time_features)
         else:
             history_tf, future_tf = compute_batch_time_features(
                 start=batch.start,
@@ -243,39 +243,34 @@ class TimeSeriesForecaster:
                 frequency=batch.frequency,
             )
 
-        x, y = batch.history, batch.future
-
-        # Check for NaN or inf in inputs
-        if jnp.isnan(x).any():
-            print(f"WARNING: NaN detected in input x at step {self.model_state.step}")
-        if jnp.isinf(x).any():
-            print(f"WARNING: Inf detected in input x at step {self.model_state.step}")
-        if jnp.isnan(y).any():
-            print(f"WARNING: NaN detected in target y at step {self.model_state.step}")
-        if jnp.isinf(y).any():
-            print(f"WARNING: Inf detected in target y at step {self.model_state.step}")
+        x, y = jnp.array(batch.history), jnp.array(batch.future)
 
         self.model_state, loss = self._train_step(
             self.model_state, x, history_tf, future_tf, y, None, self._next_rng()
         )
 
-        # Check for NaN in loss
-        if jnp.isnan(loss):
-            print(f"ERROR: NaN loss at step {self.model_state.step}")
-            print(f"  Input stats: min={jnp.min(x):.4f}, max={jnp.max(x):.4f}, mean={jnp.mean(x):.4f}")
-            print(f"  Target stats: min={jnp.min(y):.4f}, max={jnp.max(y):.4f}, mean={jnp.mean(y):.4f}")
-
         return loss.item()
 
-    def train(self, loader: DataLoader) -> list[float]:
+    def train(self, loader: DataLoader, num_epochs: int, checkpoint_path: str = None) -> list[float]:
         losses = []
-        for batch in tqdm(loader, total=len(loader)):
-            loss = self.train_step(batch)
-            if self.model_state.step % self.config.log_every == 0:
-                print(f"Step {self.model_state.step:4d} | Loss: {loss:.6f}")
-            losses.append(loss)
-        print(f"Training complete. Final loss: {losses[-1]:.6f}")
-        return losses
+
+        for epoch in tqdm(range(num_epochs)):
+            epoch_losses = []
+            pbar = tqdm(loader, total=len(loader), desc=f"Epoch {epoch + 1}")
+
+            for batch in pbar:
+                # Training step
+                loss = self.train_step(batch)
+                epoch_losses.append(loss)
+                pbar.set_postfix({'loss': f'{loss:.4f}'})
+
+            avg_loss = np.mean(epoch_losses)
+            print(f"  Epoch {epoch + 1} - Avg Loss: {avg_loss:.4f}")
+            losses.append(avg_loss)
+
+            # Save checkpoint after each epoch (overwrites previous safely)
+            if checkpoint_path:
+                self._safe_save(checkpoint_path)
 
     def predict(self, x_hist: Array, t_hist: Array, t_future: Array) -> Array:
         if x_hist.ndim == 3:
@@ -290,9 +285,18 @@ class TimeSeriesForecaster:
         self.key, rng = jax.random.split(self.key)
         return rng
 
+    def _safe_save(self, path: str):
+        """Save checkpoint safely: write to temp file first, then rename."""
+        import os
+        temp_path = path + ".tmp"
+        pickle.dump(self.model_state.params, open(temp_path, "wb"))
+        os.replace(temp_path, path)  # Atomic operation
+
     def save(self, path: str):
-        pickle.dump(self.model_state.params, open(path, "wb"))
+        """Save model parameters to file."""
+        self._safe_save(path)
 
     def load(self, path: str):
+        """Load model parameters from file."""
         params = pickle.load(open(path, "rb"))
         self.model_state = self.model_state.replace(params=params)

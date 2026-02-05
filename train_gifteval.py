@@ -10,19 +10,17 @@ from gluonts.dataset.repository import get_dataset
 
 from src.config import load_config, cfg_to_training_config
 from src.tsf import TimeSeriesForecaster
-from src.data.containers import NpBatchTSContainer
+from src.data.containers import NpBatchTSContainer, BatchContainerLoader
 from src.data.time_features import compute_batch_time_features
 from src.data.frequency import parse_frequency
 
-from tqdm import tqdm
 
-
-class GiftEvalDataLoader:
+class GiftEvalDataLoader(BatchContainerLoader):
     """DataLoader for GIFT-Eval that yields NpBatchTSContainer."""
 
     def __init__(self, data, freq, prediction_length, batch_size=32,
                  context_lengths=(128, 512, 1024), max_windows_per_series=100,
-                 time_dim=6, seed=42):
+                 time_dim=6, seed=42, regenerate_windows=True):
         self.data = list(data)
         self.freq = freq
         self.prediction_length = prediction_length
@@ -30,20 +28,22 @@ class GiftEvalDataLoader:
         self.context_lengths = context_lengths
         self.max_windows_per_series = max_windows_per_series
         self.time_dim = time_dim
+        self.seed = seed
+        self.regenerate_windows = regenerate_windows
+        self._iteration_count = 0
 
         # Parse frequency once
         self.frequency = parse_frequency(freq)
 
-        # Set seed
-        random.seed(seed)
-        np.random.seed(seed)
-
-        # Create windows
-        self.windows = self._create_windows()
-        random.shuffle(self.windows)
+        # Create initial windows
+        self._create_windows()
 
     def _create_windows(self):
         """Generate windows with random context lengths."""
+        current_seed = self.seed + self._iteration_count
+        random.seed(current_seed)
+        np.random.seed(current_seed)
+
         windows = []
 
         for ts in self.data:
@@ -72,15 +72,23 @@ class GiftEvalDataLoader:
                     'start': ts['start'],
                 })
 
-        return windows
+        self.windows = windows
+        random.shuffle(self.windows)
 
     def __len__(self):
         return len(self.windows) // self.batch_size
 
     def __iter__(self):
         """Yield batches as NpBatchTSContainer."""
-        random.shuffle(self.windows)
+        # Regenerate windows if requested, otherwise just reshuffle
+        if self.regenerate_windows and self._iteration_count > 0:
+            self._create_windows()
+        else:
+            current_seed = self.seed + self._iteration_count
+            random.seed(current_seed)
+            random.shuffle(self.windows)
 
+        self._iteration_count += 1
         num_batches = len(self.windows) // self.batch_size
 
         for batch_idx in range(num_batches):
@@ -176,47 +184,27 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Training loop
+    # Create data loader
+    print("\n=== Creating DataLoader ===")
+    loader = GiftEvalDataLoader(
+        data=train_data,
+        freq=freq,
+        prediction_length=prediction_length,
+        batch_size=args.batch_size,
+        context_lengths=(128, 512, 1024),
+        max_windows_per_series=args.max_windows,
+        time_dim=training_config.time_dim,
+        seed=args.seed,
+        regenerate_windows=True,  # Regenerate windows each epoch for augmentation
+    )
+    print(f"Loader created with {len(loader)} batches per epoch")
+
+    # Train using TimeSeriesForecaster interface
     print(f"\n=== Training for {args.epochs} epochs ===")
-
-    for epoch in range(args.epochs):
-        print(f"\nEpoch {epoch + 1}/{args.epochs}")
-
-        # Create data loader (fresh each epoch for shuffling)
-        loader = GiftEvalDataLoader(
-            data=train_data,
-            freq=freq,
-            prediction_length=prediction_length,
-            batch_size=args.batch_size,
-            context_lengths=(128, 512, 1024),
-            max_windows_per_series=args.max_windows,
-            time_dim=training_config.time_dim,
-            seed=args.seed + epoch,  # Different seed per epoch
-        )
-        print(f"  Created loader with {len(loader)} batches")
-
-        # Custom training loop with progress bar
-        epoch_losses = []
-        pbar = tqdm(loader, total=len(loader), desc=f"Epoch {epoch + 1}")
-
-        for batch in pbar:
-            # Training step
-            loss = forecaster.train_step(batch)
-            epoch_losses.append(loss)
-
-            # Update progress bar with current loss
-            pbar.set_postfix({'loss': f'{loss:.4f}'})
-
-        avg_loss = np.mean(epoch_losses)
-        print(f"  Epoch {epoch + 1} - Avg Loss: {avg_loss:.4f}")
-
-        # Save checkpoint
-        checkpoint_path = output_dir / f"model_epoch_{epoch + 1}.pkl"
-        forecaster.save(str(checkpoint_path))
-        print(f"  Saved checkpoint: {checkpoint_path}")
+    forecaster.train(loader, num_epochs=args.epochs)
 
     print("\n=== Training Complete ===")
-    final_path = output_dir / "model_final.pkl"
+    final_path = output_dir / "model_gifteval_final.pkl"
     forecaster.save(str(final_path))
     print(f"Final model saved: {final_path}")
 

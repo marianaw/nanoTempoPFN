@@ -1,5 +1,5 @@
-# Training configuration
-# All model parameters propagate via ${...} references
+# Training configuration for RunPod
+# Uses persistent volume paths
 
 # Model architecture
 num_heads: 2
@@ -16,14 +16,13 @@ training:
   learning_rate: 1e-3
   weight_decay: 0.001
   batch_size: 32
-  num_epochs: 1
+  num_epochs: 100
   log_every: 10
 
-# Data loading
+# Data loading - PERSISTENT VOLUME PATHS
 data:
-  root_path: smalldata/data
-  timefs_rootpth: smalldata/data_timefeatures
-  # timefs_rootpth: null
+  root_path: persistent/data
+  timefs_rootpth: persistent/data_timefeatures
   full_length: 2048
   future_length: 512
   seed: 42

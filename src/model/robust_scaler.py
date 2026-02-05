@@ -1,8 +1,7 @@
-"""This is a JAXified version of TempoPFN's scaler"""
+"""This is a JAXified version of TempoPFN's robust scaler"""
 import jax
 import jax.numpy as jnp
 import chex
-from flax import linen as nn
 
 
 class RobustScaler:
