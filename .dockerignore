@@ -34,3 +34,13 @@ data/
 data_timefeatures/
 *.arrow
 *.parquet
+
+# Credentials and secrets
+.env
+.env.*
+*.pem
+*.key
+*secret*
+*credential*
+.aws/
+.gcp/
