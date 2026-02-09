@@ -1,11 +1,15 @@
 from dataclasses import dataclass, field
+import os
 import jax
 import jax.numpy as jnp
 import optax
 import chex
 import pickle
 import numpy as np
+from pathlib import Path
 from flax import linen as nn
+from flax.jax_utils import replicate, unreplicate
+from flax.training import checkpoints
 from tqdm import tqdm
 from src.data.containers import DataLoader, NpBatchTSContainer
 from src.data.time_features import compute_batch_time_features
@@ -18,7 +22,8 @@ class WeavingBlockLSTMConfig:
     n_layers: int = 4
     embedding_dim: int = 8
     num_heads: int = 2
-    weaving_layer_config: mLSTMWeavingLayerConfig = field(default_factory=lambda: mLSTMWeavingLayerConfig())
+    weaving_layer_config: mLSTMWeavingLayerConfig = field(
+        default_factory=lambda: mLSTMWeavingLayerConfig())
 
     def __post_init__(self):
         self.weaving_layer_config.embedding_dim = self.embedding_dim
@@ -72,7 +77,8 @@ class ModelConfig:
     n_layers: int = 4
     output_dim: int = 9
 
-    weaving_block_config: WeavingBlockLSTMConfig = field(default_factory=lambda: WeavingBlockLSTMConfig())
+    weaving_block_config: WeavingBlockLSTMConfig = field(
+        default_factory=lambda: WeavingBlockLSTMConfig())
 
     def __post_init__(self):
         self.weaving_block_config.weaving_layer_config.embedding_dim = self.head_embedding_dim
@@ -99,7 +105,8 @@ class xLSTMTSModel(nn.Module):
         self.output_proj = nn.Dense(self.config.output_dim)
 
     def __call__(self,
-                 x_hist: jax.Array,  # Inputs, (B, h_len, n_channels, 1) -- input_dim is 1 by default.
+                 # Inputs, (B, h_len, n_channels, 1) -- input_dim is 1 by default.
+                 x_hist: jax.Array,
                  t_hist: jax.Array,  # History timestamps, (B, h_len, K)
                  t_future: jax.Array,  # Future timestamps, (B, f_len, K)
                  training: bool = False) -> jax.Array:
@@ -111,12 +118,16 @@ class xLSTMTSModel(nn.Module):
         h_pos = self.pos_encoder(t_hist)  # (B, h_len, embedding_dim)
         # (B, h_len, 1, embedding_dim) -- we add a channel dimension
         h_pos = h_pos[:, :, None, :]
-        h_pos = jnp.repeat(h_pos, repeats=n_channels, axis=2, total_repeat_length=n_channels)  # (B, h_len, n_channels, embedding_dim)
+        # (B, h_len, n_channels, embedding_dim)
+        h_pos = jnp.repeat(h_pos, repeats=n_channels, axis=2,
+                           total_repeat_length=n_channels)
 
         # future pos embedding
         f_pos = self.pos_encoder(t_future)  # (B, f_len, embedding_dim)
         f_pos = f_pos[:, :, None, :]  # (B, f_len, 1, embedding_dim)
-        f_pos = jnp.repeat(f_pos, repeats=n_channels, axis=2, total_repeat_length=n_channels)  # (B, f_len, n_channels, embedding_dim)
+        # (B, f_len, n_channels, embedding_dim)
+        f_pos = jnp.repeat(f_pos, repeats=n_channels, axis=2,
+                           total_repeat_length=n_channels)
 
         # embedd history
         # x_hist is (B, h_len, n_channels, 1) -- n_channels = 1 for now
@@ -137,7 +148,8 @@ class xLSTMTSModel(nn.Module):
         n_state = jnp.zeros((B * n_channels, NH, DH, 1))
         m_state = jnp.zeros((B * n_channels, NH, 1, 1))
 
-        preds, _ = self.weaving_block(inputs, c_state, n_state, m_state, training=training)
+        preds, _ = self.weaving_block(
+            inputs, c_state, n_state, m_state, training=training)
         preds = preds[:, -f_len:, :]
         preds = self.output_proj(preds)
         preds = preds.reshape(B, f_len, n_channels, self.config.output_dim)
@@ -149,15 +161,17 @@ class xLSTMTSModel(nn.Module):
 class ModelState:
     params: Params
     opt_state: optax.OptState
-    step: int
+    step: chex.Array
 
 
 @dataclass
 class TrainingConfig:
+    checkpoint_path: str = "checkpoints/model_v2"  # Directory, not .pkl file!
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
     dropout: float = 0.1
-    quantiles: list[float] = field(default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    quantiles: list[float] = field(default_factory=lambda: [
+                                   0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
     model_config: ModelConfig = field(default_factory=lambda: ModelConfig())
     log_every: int = 10000
     num_epochs: int = 100
@@ -172,22 +186,25 @@ def quantile_loss(preds, targets, quantiles):
 
 class TimeSeriesForecaster:
     """Time series forecaster using xLSTM model."""
-    
+
     def __init__(self, config: TrainingConfig = None, seed: int = 42):
         self.config = config or TrainingConfig()
         self.key = jax.random.PRNGKey(seed)
         self.quantiles = jnp.array(self.config.quantiles)
 
-        #scaler for data
+        # scaler for data
         self.robust_scaler = RobustScaler(epsilon=1e-6, min_scale=1e-3)
 
         # define model:
         self.model = xLSTMTSModel(config=self.config.model_config)
 
         # Initialize model with proper input dimension
-        x = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, 1, self.config.model_config.input_dim))
-        t_hist = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
-        t_future = jax.random.normal(self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
+        x = jax.random.normal(self._next_rng(
+        ), (self.config.batch_size, 1, 1, self.config.model_config.input_dim))
+        t_hist = jax.random.normal(
+            self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
+        t_future = jax.random.normal(
+            self._next_rng(), (self.config.batch_size, 1, self.config.time_dim))
 
         params = self.model.init(self._next_rng(), x, t_hist, t_future)
 
@@ -204,30 +221,47 @@ class TimeSeriesForecaster:
         self.model_state = ModelState(
             params=params,
             opt_state=self.optimizer.init(params),
-            step=0,
+            step=jnp.int32(0),
         )
+
+        # Flax checkpointing - simple and robust
+        self.checkpoint_dir = self.config.checkpoint_path
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        # Load last checkpoint if exists
+        self.model_state = checkpoints.restore_checkpoint(
+            ckpt_dir=self.checkpoint_dir,
+            target=self.model_state,
+            prefix='checkpoint_'
+        )  #TODO make sure this is actually working.
 
         # Build JIT-compiled functions
         self._build_train_step()
 
     def _build_train_step(self):
         """Build JIT-compiled training step."""
-        
+
         def loss_fn(params, rng, x, t_hist, t_future, y, mask=None):
             x = _handle_missing_data(x)
             x_scaled, (m, iqr) = self.robust_scaler.scale(x)
             y_scaled, _ = self.robust_scaler.scale(y, stats=(m, iqr))
-            preds = self.model.apply(params, x_scaled, t_hist, t_future, training=True, rngs={"dropout": rng})
+            preds = self.model.apply(
+                params, x_scaled, t_hist, t_future, training=True, rngs={"dropout": rng})
             return quantile_loss(preds, y_scaled, self.quantiles)
 
         def _train_step(state, x, t_hist, t_future, y, mask, rng):
-            loss, grads = jax.value_and_grad(loss_fn)(state.params, rng, x, t_hist, t_future, y, mask)
-            updates, opt_state = self.optimizer.update(grads, state.opt_state, state.params)
+            loss, grads = jax.value_and_grad(loss_fn)(
+                state.params, rng, x, t_hist, t_future, y, mask)
+            loss = jax.lax.pmean(loss, axis_name='batch')
+            grads = jax.lax.pmean(grads, axis_name='batch')
+            updates, opt_state = self.optimizer.update(
+                grads, state.opt_state, state.params)
             params = optax.apply_updates(state.params, updates)
-            new_state = state.replace(params=params, opt_state=opt_state, step=state.step + 1)
+            new_state = state.replace(
+                params=params, opt_state=opt_state, step=state.step + 1)
             return new_state, loss
 
-        self._train_step = jax.jit(_train_step)
+        self._train_step = jax.pmap(_train_step, axis_name='batch')
 
     def train_step(self, batch: NpBatchTSContainer) -> float:
         # Use preloaded time features if available, otherwise compute
@@ -245,14 +279,42 @@ class TimeSeriesForecaster:
 
         x, y = jnp.array(batch.history), jnp.array(batch.future)
 
+        # For pmap: reshape batch to [num_devices, batch_per_device, ...]
+        num_devices = jax.local_device_count()
+        batch_size = x.shape[0]
+
+        # Make sure batch size is divisible by num_devices
+        if batch_size % num_devices != 0:
+            # Trim batch to be divisible
+            trim_size = (batch_size // num_devices) * num_devices
+            x, y = x[:trim_size], y[:trim_size]
+            history_tf, future_tf = history_tf[:trim_size], future_tf[:trim_size]
+            batch_size = trim_size
+
+        # Reshape: [B, ...] -> [num_devices, B//num_devices, ...]
+        def reshape_for_devices(arr):
+            new_shape = (num_devices, batch_size // num_devices) + arr.shape[1:]
+            return arr.reshape(new_shape)
+
+        x = reshape_for_devices(x)
+        y = reshape_for_devices(y)
+        history_tf = reshape_for_devices(history_tf)
+        future_tf = reshape_for_devices(future_tf)
+
+        # Split RNG for each device
+        rngs = jax.random.split(self._next_rng(), num_devices)
+
         self.model_state, loss = self._train_step(
-            self.model_state, x, history_tf, future_tf, y, None, self._next_rng()
+            self.model_state, x, history_tf, future_tf, y, None, rngs
         )
 
-        return loss.item()
+        # loss is now [num_devices], take mean
+        return loss.mean().item()
 
-    def train(self, loader: DataLoader, num_epochs: int, checkpoint_path: str = None) -> list[float]:
+    def train(self, loader: DataLoader, num_epochs: int) -> list[float]:
         losses = []
+
+        self.model_state = replicate(self.model_state)
 
         for epoch in tqdm(range(num_epochs)):
             epoch_losses = []
@@ -268,16 +330,20 @@ class TimeSeriesForecaster:
             print(f"  Epoch {epoch + 1} - Avg Loss: {avg_loss:.4f}")
             losses.append(avg_loss)
 
-            # Save checkpoint after each epoch (overwrites previous safely)
-            if checkpoint_path:
-                self._safe_save(checkpoint_path)
+            # Save checkpoint after each epoch (orbax keeps last 2)
+            self._safe_save(epoch + 1)
+
+        self.model_state = unreplicate(self.model_state)
+
+        return losses
 
     def predict(self, x_hist: Array, t_hist: Array, t_future: Array) -> Array:
         if x_hist.ndim == 3:
             x_hist = x_hist[:, :, :, None]
 
         x_hist, (m, iqr) = self.robust_scaler.scale(x_hist)
-        preds = self.model.apply(self.model_state.params, x_hist, t_hist, t_future, training=False)
+        preds = self.model.apply(
+            self.model_state.params, x_hist, t_hist, t_future, training=False)
         preds = self.robust_scaler.inverse_scale(preds, m, iqr)
         return preds
 
@@ -285,12 +351,16 @@ class TimeSeriesForecaster:
         self.key, rng = jax.random.split(self.key)
         return rng
 
-    def _safe_save(self, path: str):
-        """Save checkpoint safely: write to temp file first, then rename."""
-        import os
-        temp_path = path + ".tmp"
-        pickle.dump(self.model_state.params, open(temp_path, "wb"))
-        os.replace(temp_path, path)  # Atomic operation
+    def _safe_save(self, step: int):
+        # Flax checkpointing - atomic writes, automatic cleanup
+        checkpoints.save_checkpoint(
+            ckpt_dir=self.checkpoint_dir,
+            target=unreplicate(self.model_state),
+            step=step,
+            prefix='checkpoint_',
+            keep=2,  # Keep last 2 checkpoints
+            overwrite=True
+        )
 
     def save(self, path: str):
         """Save model parameters to file."""

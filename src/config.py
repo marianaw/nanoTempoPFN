@@ -115,6 +115,7 @@ def cfg_to_training_config(cfg):
     training_cfg = cfg.training if "training" in cfg else cfg
 
     return TrainingConfig(
+        checkpoint_path=training_cfg.get("checkpoint_path", "checkpoints/model_v2"),
         learning_rate=training_cfg.get("learning_rate", 1e-3),
         weight_decay=training_cfg.get("weight_decay", 0.0),
         dropout=cfg.dropout,
