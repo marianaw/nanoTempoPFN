@@ -2,6 +2,7 @@
 """Minimal training script for TimeSeriesForecaster."""
 
 import argparse
+import jax
 from pathlib import Path
 from src.config import load_config, cfg_to_training_config
 from src.data.containers import ShardedDataset, DataLoader
@@ -14,12 +15,6 @@ def main():
         type=str,
         default="conf/training.yaml",
         help="Path to training config YAML file"
-    )
-    parser.add_argument(
-        "--save-path",
-        type=str,
-        default="checkpoints/pretrained_model.pkl",
-        help="Path to save trained model"
     )
     args = parser.parse_args()
 
@@ -53,9 +48,10 @@ def main():
     # Training loop
     num_epochs = training_config.num_epochs
     print(f"\nStarting training for {num_epochs} epochs...")
-    print(f"Checkpoints will be saved to {args.save_path} after each epoch")
-    forecaster.train(loader, num_epochs=num_epochs, checkpoint_path=args.save_path)
+    print(f"Checkpoints will be saved to {training_config.checkpoint_path} after each epoch")
+    forecaster.train(loader, num_epochs=num_epochs)
     print("\nTraining complete!")
 
 if __name__ == "__main__":
+    # jax.distributed.initialize()
     main()

@@ -18,6 +18,7 @@ training:
   batch_size: 32
   num_epochs: 1
   log_every: 10
+  checkpoint_path: /Users/mariana/Documents/projects/ts/nanoTempoPFN/checkpoints/model_v2
 
 # Data loading
 data:
