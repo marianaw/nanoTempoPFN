@@ -87,7 +87,8 @@ class ModelConfig:
 
 
 def _handle_missing_data(x):
-    """Replace NaN values with zeros."""
+    """Replace NaN values with zeros. For now there's no NaNs in the data,
+    I need to work on this bit."""
     return jnp.where(jnp.isnan(x), 0.0, x)
 
 
@@ -233,7 +234,7 @@ class TimeSeriesForecaster:
             ckpt_dir=self.checkpoint_dir,
             target=self.model_state,
             prefix='checkpoint_'
-        )  #TODO make sure this is actually working.
+        )
 
         # Build JIT-compiled functions
         self._build_train_step()
