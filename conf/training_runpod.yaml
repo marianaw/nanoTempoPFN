@@ -18,7 +18,7 @@ training:
   batch_size: 256
   num_epochs: 100
   log_every: 10
-  checkpoint_path: persistent/checkpoints/model
+  checkpoint_path: /workspace/persistent/checkpoints/model
 
 # Data loading - PERSISTENT VOLUME PATHS
 data:
