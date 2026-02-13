@@ -36,7 +36,7 @@ class TempoPredictorWrapper(Predictor):
         """Generate forecasts for the test data."""
         for entry in dataset:
             # Extract target and metadata
-            target = np.array(entry['target'])
+            target = np.asarray(entry['target'])
             start = entry['start']
             item_id = entry.get('item_id', '')
 
@@ -59,7 +59,7 @@ class TempoPredictorWrapper(Predictor):
 
             # Predict
             preds = self.forecaster.predict(context_jnp, history_tf, future_tf)
-            preds = np.array(preds[0, :, 0, :])  # (pred_len, num_quantiles)
+            preds = np.asarray(preds[0, :, 0, :])  # (pred_len, num_quantiles)
 
             # Create forecast start (after full target)
             forecast_start = start + len(target)

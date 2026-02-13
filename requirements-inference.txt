@@ -1,0 +1,31 @@
+# Inference environment for GIFT-eval (NumPy 1.x compatible)
+
+# NumPy 1.x for GIFT-eval compatibility
+numpy>=1.24.0,<2.0
+
+# JAX with CUDA support
+--find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+# jax[cuda12]>=0.4.30
+jax>=0.4.30
+jaxlib>=0.4.30
+
+# Core ML libraries
+flax>=0.7.0
+optax>=0.1.9
+chex>=0.1.85
+
+# Time series and evaluation
+gluonts>=0.14.0
+pandas>=2.0.0,<2.2.0  # Compatible with NumPy 1.x
+
+# Configuration and utilities
+omegaconf>=2.3.0
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# Jupyter for notebooks
+jupyter
+ipykernel
+
+# GIFT-eval (install from git)
+# Note: Install separately with: pip install -e /path/to/gift-eval
