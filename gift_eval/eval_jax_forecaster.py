@@ -522,7 +522,13 @@ if __name__ == '__main__':
         type=str,
         help='Path to gift-eval datasets, needs downloading.'
     )
+    parser.add_argument(
+        '--context_length',
+        default=3072,
+        type=int,
+        help='Context length.'
+    )
     
     args = parser.parse_args()
 
-    main(args.dataset_name, args.storage_path, args.config_path, args.output_dir)
+    main(args.dataset_name, args.storage_path, args.config_path, args.output_dir, args.context_length)
